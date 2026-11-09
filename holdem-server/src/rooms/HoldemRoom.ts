@@ -2,6 +2,7 @@ import {Room, type Client} from 'colyseus';
 import {Holdem, MAX_PLAYERS, type Move} from '../game/engine.js';
 import {decideBot, type Difficulty} from './botStrategy.js';
 const TURN_SECONDS=30;
+const NEXT_HAND_DELAY_MS=10000;
 const RECONNECT_SECONDS=45;
 const validDifficulty=(x:unknown):x is Difficulty=>x==='easy'||x==='medium'||x==='hard';
 export class HoldemRoom extends Room {
@@ -10,6 +11,9 @@ export class HoldemRoom extends Room {
   private botSerial=0;
   private botLevels=new Map<string,Difficulty>();
   private botTimer:ReturnType<typeof setTimeout>|undefined;
+  private nextHandTimer:ReturnType<typeof setTimeout>|undefined;
+  private nextHandKey=0;
+  private nextHandAt=0;
   private turnTimer:ReturnType<typeof setTimeout>|undefined;
   private turnDeadline=0;
   private turnKey='';
@@ -27,7 +31,8 @@ export class HoldemRoom extends Room {
       }
       this.sync();
     }));
-    this.onMessage('start',client=>this.safe(client,()=>{if(this.game.active())throw new Error('게임 진행 중');this.game.start();this.sync()}));
+    this.onMessage('start',client=>this.safe(client,()=>{if(this.game.active())throw new Error('게임 진행 중');this.cancelNextHand();this.game.start();this.sync()}));
+    this.onMessage('rebuy',client=>this.safe(client,()=>{this.game.rebuy(client.sessionId);this.sync()}));
     this.onMessage('move',(client,msg:{move:Move;amount?:number})=>this.safe(client,()=>{
       if(!msg||!['fold','check','call','raise','allin'].includes(msg.move))throw new Error('잘못된 행동');
       this.game.action(client.sessionId,msg.move,msg.amount);this.sync();
@@ -50,12 +55,35 @@ export class HoldemRoom extends Room {
     this.sync();
   }
   onLeave(client:Client){this.game.remove(client.sessionId);this.sync();}
-  onDispose(){if(this.botTimer)clearTimeout(this.botTimer);if(this.turnTimer)clearTimeout(this.turnTimer);}
-  private snapshot(id:string){return {...this.game.view(id),turnDeadline:this.turnDeadline,turnSeconds:TURN_SECONDS,turnRemainingMs:Math.max(0,this.turnDeadline-Date.now())};}
+  onDispose(){if(this.botTimer)clearTimeout(this.botTimer);if(this.turnTimer)clearTimeout(this.turnTimer);this.cancelNextHand();}
+  private snapshot(id:string){return {...this.game.view(id),turnDeadline:this.turnDeadline,turnSeconds:TURN_SECONDS,turnRemainingMs:Math.max(0,this.turnDeadline-Date.now()),nextHandRemainingMs:Math.max(0,this.nextHandAt-Date.now())};}
   private sync(){
     this.scheduleTurn();
+    this.scheduleNextHand();
     for(const c of this.clients)c.send('snapshot',this.snapshot(c.sessionId));
     this.scheduleBot();
+  }
+  private cancelNextHand(){
+    if(this.nextHandTimer)clearTimeout(this.nextHandTimer);
+    this.nextHandTimer=undefined;this.nextHandAt=0;this.nextHandKey=0;
+  }
+  private scheduleNextHand(){
+    if(this.game.street!=='showdown'){this.cancelNextHand();return;}
+    // Never auto-start with fewer than two eligible participants.
+    if(this.game.players.filter(p=>p.connected&&p.stack>0).length<2){this.cancelNextHand();return;}
+    if(this.nextHandKey===this.game.handNo)return;
+    this.cancelNextHand();
+    this.nextHandKey=this.game.handNo;
+    this.nextHandAt=Date.now()+NEXT_HAND_DELAY_MS;
+    this.nextHandTimer=setTimeout(()=>{
+      this.nextHandTimer=undefined;this.nextHandAt=0;
+      if(this.game.street!=='showdown'||this.game.handNo!==this.nextHandKey)return;
+      const ready=this.game.players.filter(p=>p.connected&&p.stack>0);
+      if(ready.length>=2){
+        try{this.game.start();}catch(e){console.error('Auto next hand error',e);}
+      }
+      this.sync();
+    },NEXT_HAND_DELAY_MS);
   }
   private scheduleTurn(){
     const p=this.game.players.find(p=>p.seat===this.game.turn);

@@ -1,4 +1,4 @@
-import { newDeck, bestOfSeven, compareRanks, HAND_NAMES, type Card } from './cards.js';
+import { newDeck, bestOfSeven, rankFive, compareRanks, HAND_NAMES, type Card } from './cards.js';
 export type Move = 'fold'|'check'|'call'|'raise'|'allin';
 export type Street = 'waiting'|'preflop'|'flop'|'turn'|'river'|'showdown';
 export interface Player {id:string;name:string;seat:number;stack:number;hole:Card[];folded:boolean;allIn:boolean;streetBet:number;totalBet:number;acted:boolean;raiseRights:boolean;connected:boolean;}
@@ -9,12 +9,16 @@ export class Holdem {
   dealer=-1; turn=-1; currentBet=0; minRaise=100; smallBlind=50; bigBlind=100;
   handNo=0; log:string[]=[]; reveal:Record<string,Card[]>={}; lastPots:Pot[]=[];
   result:{winners:{id:string;name:string;amount:number;handName:string}[]}|null=null;
+  showdownHands:{id:string;name:string;hole:Card[];handName:string;folded:boolean}[]=[];
+  private handBank=0;
   add(id:string,name:string) {
     if(this.players.some(p=>p.id===id)) throw new Error('이미 참여한 플레이어');
     if(this.players.length>=MAX_PLAYERS)throw new Error(`최대 ${MAX_PLAYERS}명`);
     const occupied=new Set(this.players.map(p=>p.seat));
     const seat=Array.from({length:MAX_PLAYERS},(_,i)=>i).find(s=>!occupied.has(s))!;
     this.players.push({id,name:name.slice(0,14)||'Player',seat,stack:10000,hole:[],folded:true,allIn:false,streetBet:0,totalBet:0,acted:false,raiseRights:false,connected:true});
+    // Late arrivals keep their 10,000 chips off-table until the next hand.
+    if(this.active())this.handBank+=10000;
     this.players.sort((a,b)=>a.seat-b.seat);
   }
   remove(id:string) {
@@ -28,6 +32,15 @@ export class Holdem {
     if(!this.active())this.players=this.players.filter(x=>x.connected);
   }
   active(){return this.street!=='waiting'&&this.street!=='showdown';}
+  rebuy(id:string){
+    const p=this.players.find(p=>p.id===id);
+    if(!p||!p.connected)throw new Error('플레이어를 찾을 수 없습니다');
+    if(p.stack>0)throw new Error('칩이 0개일 때만 재참가할 수 있습니다');
+    if(this.active())throw new Error('핸드가 끝난 뒤 재참가해 주세요');
+    p.stack=10000;p.folded=true;p.hole=[];p.allIn=false;
+    p.streetBet=0;p.totalBet=0;p.acted=false;p.raiseRights=false;
+    this.log.unshift(`${p.name} 10,000칩 재참가 신청`);
+  }
   private eligible(){return this.players.filter(p=>p.connected&&p.stack>0);}
   private nextSeat(from:number,predicate:(p:Player)=>boolean):Player|undefined {
     for(let i=1;i<=MAX_PLAYERS;i++) {
@@ -45,7 +58,8 @@ export class Holdem {
     this.players=this.players.filter(p=>p.connected);
     const ready=this.eligible();
     if(ready.length<2)throw new Error('칩이 남은 참가자가 최소 2명 필요');
-    this.handNo++;this.street='preflop';this.board=[];this.deck=newDeck();this.log=[];this.reveal={};this.lastPots=[];this.result=null;
+    this.handBank=this.players.reduce((sum,p)=>sum+p.stack,0);
+    this.handNo++;this.street='preflop';this.board=[];this.deck=newDeck();this.log=[];this.reveal={};this.lastPots=[];this.result=null;this.showdownHands=[];
     this.dealer=this.nextSeat(this.dealer,p=>p.connected&&p.stack>0)!.seat;
     for(const p of this.players) {
       p.hole=[];p.folded=!(p.connected&&p.stack>0);p.allIn=false;
@@ -147,9 +161,25 @@ export class Holdem {
     }
     return result;
   }
+  private rankAtShowdown(hole:Card[]):string {
+    const cards=[...hole,...this.board];
+    if(cards.length<5)return '보드 미완성';
+    if(cards.length===7)return HAND_NAMES[bestOfSeven(cards)[0]];
+    let best:number[]|null=null;
+    for(let a=0;a<cards.length-4;a++)for(let b=a+1;b<cards.length-3;b++)
+      for(let c=b+1;c<cards.length-2;c++)for(let d=c+1;d<cards.length-1;d++)
+        for(let e=d+1;e<cards.length;e++){
+          const r=rankFive([cards[a],cards[b],cards[c],cards[d],cards[e]]);
+          if(!best||compareRanks(r,best)>0)best=r;
+        }
+    return best?HAND_NAMES[best[0]]:'보드 미완성';
+  }
   private settle(){
     const survivors=this.remaining();
     if(survivors.length>1&&this.board.length!==5)throw new Error('보드 5장 필요');
+    this.showdownHands=this.players.filter(p=>p.hole.length===2).map(p=>({
+      id:p.id,name:p.name,hole:[...p.hole],handName:this.rankAtShowdown(p.hole),folded:p.folded
+    }));
     const scores=new Map<string,number[]>();
     for(const p of survivors){if(this.board.length===5)scores.set(p.id,bestOfSeven([...p.hole,...this.board]));this.reveal[p.id]=[...p.hole];}
     const pots=this.pots();this.lastPots=pots;
@@ -175,18 +205,20 @@ export class Holdem {
     this.result={winners:[...paid.values()]};
     this.street='showdown';this.turn=-1;this.currentBet=0;
     const total=this.players.reduce((s,p)=>s+p.stack,0);
-    if(total!==this.players.length*10000) {
+    if(total!==this.handBank) {
       // Disconnected players are deliberately retained through settlement.
-      throw new Error(`칩 보존 오류: ${total}`);
+      throw new Error(`칩 보존 오류: ${total} / 기대 ${this.handBank}`);
     }
   }
   view(forId:string){
     return {
       street:this.street,board:this.board,dealer:this.dealer,turn:this.turn,currentBet:this.currentBet,minRaise:this.minRaise,
       bigBlind:this.bigBlind,handNo:this.handNo,log:this.log.slice(0,12),pots:this.active()?this.pots():this.lastPots,result:this.result,
+      showdownHands:this.street==='showdown'?this.showdownHands:[],
       totalPot:this.players.reduce((sum,p)=>sum+p.totalBet,0),
       players:this.players.map(p=>({id:p.id,name:p.name,seat:p.seat,stack:p.stack,folded:p.folded,allIn:p.allIn,streetBet:p.streetBet,totalBet:p.totalBet,connected:p.connected,
-        hole:p.id===forId?p.hole:(this.street==='showdown'?this.reveal[p.id]||[]:[]),cardsCount:p.hole.length})),
+        hole:p.id===forId?p.hole:(this.street==='showdown'?p.hole:[]),cardsCount:p.hole.length,
+        waitingForNextHand:this.active()&&p.hole.length===0})),
       you:forId
     };
   }

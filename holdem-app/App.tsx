@@ -17,6 +17,7 @@ import {estimateEquity, bestSeven, type EquityResult} from './src/game/equity';
 // 검증된 온라인 서버 주소를 유지합니다.
 const SERVER = 'https://green-holdem-server.onrender.com';
 const SESSION_KEY = 'greenholdem-reconnect-v05';
+const NICKNAME_KEY = 'greenholdem-nickname-v058';
 const C = {
   bg: '#07130F', surface: '#10241C', elevated: '#17352A',
   felt: '#08633C', feltInner: '#087548', rail: '#704B29',
@@ -172,7 +173,7 @@ function PlayerSeat({p, dealer, turn, mine, width = 93, blind, handNo = 0}: {
 
 export default function App() {
   const {width: screenWidth, height: screenHeight} = useWindowDimensions();
-  const [name, setName] = useState('Player' + Math.floor(Math.random() * 900 + 100));
+  const [name, setName] = useState('');
   const [code, setCode] = useState('');
   const [room, setRoom] = useState<Room | null>(null);
   const roomRef = useRef<Room | null>(null);
@@ -190,15 +191,21 @@ export default function App() {
   const turnSound = useAudioPlayer(require('./assets/sounds/turn.wav'));
   const actionSound = useAudioPlayer(require('./assets/sounds/action.wav'));
   const winSound = useAudioPlayer(require('./assets/sounds/win.wav'));
+  const chipBetSound = useAudioPlayer(require('./assets/sounds/chip_bet.wav'));
+  const chipWinSound = useAudioPlayer(require('./assets/sounds/chip_win.wav'));
+  const keyboardSound = useAudioPlayer(require('./assets/sounds/keyboard_click.wav'));
   const [soundEnabled, setSoundEnabled] = useState(true);
   const soundEnabledRef = useRef(true);
   const lastSoundSnapshot = useRef<Snapshot | null>(null);
-  const playEffect = (kind: 'deal' | 'turn' | 'action' | 'win') => {
+  const playEffect = (kind: 'deal' | 'turn' | 'action' | 'win' | 'chipBet' | 'chipWin' | 'keyboard') => {
     if (!soundEnabledRef.current) return;
-    const player = kind === 'deal' ? dealSound : kind === 'turn' ? turnSound : kind === 'action' ? actionSound : winSound;
+    const player = kind === 'deal' ? dealSound : kind === 'turn' ? turnSound
+      : kind === 'action' ? actionSound : kind === 'win' ? winSound
+      : kind === 'chipBet' ? chipBetSound : kind === 'chipWin' ? chipWinSound : keyboardSound;
     void player.seekTo(0).then(() => player.play()).catch(() => {});
   };
   const setSound = (enabled: boolean) => { soundEnabledRef.current = enabled; setSoundEnabled(enabled); };
+  const homeClick = (action: () => void) => { playEffect('keyboard'); action(); };
 
 
   const attachRoom = (joined:Room) => {
@@ -215,6 +222,15 @@ export default function App() {
       const previous = lastSoundSnapshot.current;
       lastSoundSnapshot.current = next;
       if (previous && previous.handNo === next.handNo) {
+        // Play once per snapshot containing confirmed chip movement, not on a speculative tap.
+        const paidIn = next.players.some(p => p.totalBet > (previous.players.find(old => old.id === p.id)?.totalBet ?? p.totalBet));
+        // A payout is a stack increase when the hand settles, rather than buy-in/rejoin.
+        const paidOut = next.players.some(p => {
+          const old = previous.players.find(q => q.id === p.id);
+          return !!old && p.stack > old.stack && (next.street === 'showdown' || previous.street === 'showdown');
+        });
+        if (paidIn) playEffect('chipBet');
+        if (paidOut) playEffect('chipWin');
         const prevMe = previous.players.find(p => p.id === previous.you);
         const nextMe = next.players.find(p => p.id === next.you);
         const prevMyTurn = !!prevMe && previous.turn === prevMe.seat && previous.street !== 'waiting' && previous.street !== 'showdown';
@@ -257,6 +273,11 @@ export default function App() {
   };
   useEffect(()=>{
     let alive=true;
+    void AsyncStorage.getItem(NICKNAME_KEY).then(saved=>{if(alive&&saved)setName(saved);}).catch(()=>{});
+    return ()=>{alive=false;};
+  },[]);
+  useEffect(()=>{
+    let alive=true;
     void AsyncStorage.getItem(SESSION_KEY).then(token=>{
       if(alive&&token&&!roomRef.current){resumeToken.current=token;setHasResumeToken(true);}
     }).catch(()=>{});
@@ -267,6 +288,7 @@ export default function App() {
     if (!name.trim()) return Alert.alert('알림', '닉네임을 입력하세요');
     if (kind === 'join' && !code.trim()) return Alert.alert('알림', '초대 코드를 입력하세요');
     setBusy(true);
+    void AsyncStorage.setItem(NICKNAME_KEY,name.trim()).catch(()=>{});
     try {
       const client = new Client(SERVER);
       const joined = kind !== 'join'
@@ -359,12 +381,12 @@ export default function App() {
           <View style={styles.homePanel}>
             <SectionLabel>PLAYER PROFILE</SectionLabel>
             <Text style={styles.fieldLabel}>닉네임</Text>
-            <TextInput style={styles.textInput} value={name} onChangeText={setName} maxLength={14}
-              placeholder="닉네임 입력" placeholderTextColor="#759682"/>
+            <TextInput style={styles.textInput} value={name} onChangeText={setName} onFocus={()=>playEffect('keyboard')} maxLength={14}
+              placeholder="원하는 닉네임 입력 (최대 14자)" placeholderTextColor="#759682"/>
             <SectionLabel>난이도 · 내 화면 정보 / AI 전략</SectionLabel>
             <View style={styles.v05DifficultyRow}>
               {(['easy','medium','hard'] as const).map(level => (
-                <TouchableOpacity key={level} onPress={()=>setAiDifficulty(level)} style={[styles.v05Difficulty,aiDifficulty===level&&styles.v05DifficultySelected]}>
+                <TouchableOpacity key={level} onPress={()=>homeClick(()=>setAiDifficulty(level))} style={[styles.v05Difficulty,aiDifficulty===level&&styles.v05DifficultySelected]}>
                   <Text style={[styles.v05DifficultyLabel,aiDifficulty===level&&{color:C.gold}]}>{level==='easy'?'쉬움':level==='medium'?'보통':'어려움'}</Text>
                 </TouchableOpacity>
               ))}
@@ -372,17 +394,17 @@ export default function App() {
             <Text style={styles.difficultyHelp}>
               {aiDifficulty === 'easy' ? '쉬움: 내 현재 족보 + 추정 승률 표시' : aiDifficulty === 'medium' ? '보통: 기존 화면 그대로 (추정 승률 표시)' : '어려움: 족보 안내와 추정 승률 숨김'}
             </Text>
-            {hasResumeToken?<Button title={reconnectBusy?'재접속 시도 중...':'이전 방 재접속 (45초 이내)'} tone="outline" disabled={reconnectBusy} onPress={()=>void reconnect()}/>:null}
+            {hasResumeToken?<Button title={reconnectBusy?'재접속 시도 중...':'이전 방 재접속 (45초 이내)'} tone="outline" disabled={reconnectBusy} onPress={()=>homeClick(()=>void reconnect())}/>:null}
             <View style={styles.homeButtons}>
-              <Button title="♠  온라인 비공개 방 만들기" disabled={busy} onPress={() => void connect('create')}/>
-              <Button title="♣  혼자 연습하기 · AI 2명" disabled={busy} tone="green" onPress={() => void connect('solo')}/>
+              <Button title="♠  온라인 비공개 방 만들기" disabled={busy} onPress={() => homeClick(() => void connect('create'))}/>
+              <Button title="♣  혼자 연습하기 · AI 2명" disabled={busy} tone="green" onPress={() => homeClick(() => void connect('solo'))}/>
             </View>
             <View style={styles.divider}/>
             <SectionLabel>JOIN A PRIVATE TABLE</SectionLabel>
             <Text style={styles.fieldLabel}>친구에게 받은 방 코드</Text>
-            <TextInput style={styles.textInput} value={code} onChangeText={setCode}
+            <TextInput style={styles.textInput} value={code} onChangeText={setCode} onFocus={()=>playEffect('keyboard')}
               autoCapitalize="none" autoCorrect={false} placeholder="초대 코드 입력" placeholderTextColor="#759682"/>
-            <Button title="초대 코드로 입장  →" disabled={busy} tone="outline" onPress={() => void connect('join')}/>
+            <Button title="초대 코드로 입장  →" disabled={busy} tone="outline" onPress={() => homeClick(() => void connect('join'))}/>
             {busy ? <ActivityIndicator color={C.gold} style={{marginTop: 14}}/> : null}
           </View>
           <View style={styles.homeFooter}>
@@ -432,6 +454,8 @@ export default function App() {
     return pos ? {x: pos.left + seatWidth / 2 - 10, y: pos.top + 52} : null;
   };
   const handIsOver = state.street === 'waiting' || state.street === 'showdown';
+  const waitingThisHand = !!(state && me && state.street !== 'waiting' && state.street !== 'showdown' && me.waitingForNextHand);
+  const busted = !!(state && me && me.stack===0 && (state.street==='waiting'||state.street==='showdown'));
   const canStart = state.players.filter(p => p.connected && p.stack > 0).length >= 2;
   const canRaise = connected && Number.isSafeInteger(Number(raise)) && Number(raise) >= minTotal && Number(raise) > 0 && Number(raise) <= maxTotal;
 
@@ -468,6 +492,7 @@ export default function App() {
             <TurnClock key={`${state.handNo}-${state.street}-${state.turn}`} deadline={deadline} totalSeconds={state.turnSeconds??30}
               label={myTurn?'내 차례 · 0초면 자동 폴드':'현재 턴 제한시간'}/>
           ):null}
+          {waitingThisHand ? <View style={styles.v058Info}><Text style={styles.v058InfoText}>관전 중 · 현재 판 종료 후 다음 핸드에 참가합니다. 팟과 커뮤니티 카드를 볼 수 있어요.</Text></View> : null}
           <View style={styles.tableAndActions}>
           <View style={[styles.tableShell, {width: tableWidth, height: tableHeight}]}>
             <View style={styles.tableInner}/>
@@ -503,10 +528,15 @@ export default function App() {
             <Text style={styles.railHeading}>YOUR ACTION</Text>
             {handIsOver ? (
               <View style={styles.railControls}>
-                <Button title={state.street === 'waiting' ? '게임 시작' : '다음 핸드'} disabled={!canStart} compact onPress={start}/>
+                {busted ? <Button title="10,000칩 재참가" tone="green" compact onPress={() => roomRef.current?.send('rebuy')}/> : null}
+                {state.street === 'showdown' ? (
+                  <Text style={styles.railWaiting}>{canStart ? '10초 후 자동 다음 판' : '다음 판 대기 · 참가자 부족'}</Text>
+                ) : <Button title="게임 시작" disabled={!canStart} compact onPress={start}/>}
                 <Button title="AI 추가" tone="outline" compact disabled={state.players.length >= 7}
                   onPress={() => roomRef.current?.send('addBot', {count: 1,difficulty:aiDifficulty})}/>
               </View>
+            ) : waitingThisHand ? (
+              <Text style={styles.railWaiting}>현재 판 관전 중{`\n`}다음 판부터 참여</Text>
             ) : myTurn && me && !me.folded && !me.allIn ? (
               <View style={styles.railControls}>
                 <Text style={styles.railCall}>콜 {formatChips(Math.min(toCall, me.stack))}</Text>
@@ -549,6 +579,18 @@ export default function App() {
           {state.street==='showdown'&&state.result?<ShowdownBanner
             winners={aiDifficulty === 'hard' ? state.result.winners.map(w => ({...w, handName: ''})) : state.result.winners}
             you={state.you}/>:null}
+          {state.street==='showdown' && (state.showdownHands?.length ?? 0)>0 ? (
+            <View style={styles.v058ShowdownPanel}>
+              <Text style={styles.controlTitle}>SHOWDOWN · 플레이어별 족보</Text>
+              <Text style={styles.v058Subtext}>폴드한 플레이어의 카드도 판 종료 후 공개합니다. 보드가 완성되지 않았다면 족보 판정이 제한됩니다.</Text>
+              {state.showdownHands!.map(p=>(
+                <View key={p.id} style={styles.v058ResultRow}>
+                  <Text style={styles.v058ResultName}>{p.name}{p.folded?' (폴드)':''}</Text>
+                  <Text style={styles.v058ResultHand}>{p.hole.map(cardText).join('  ')} · {p.handName}</Text>
+                </View>
+              ))}
+            </View>
+          ):null}
           {handIsOver ? <View style={styles.logPanel}>
             <Text style={styles.controlTitle}>GAME HISTORY</Text>
             {state.log.slice(-6).map((line, i) => <Text style={styles.logText} key={i}>•  {aiDifficulty === 'hard' ? handNames.reduce((s, name) => s.split(name).join('비공개'), line) : line}</Text>)}
@@ -560,6 +602,14 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  v058Info:{marginVertical:5,padding:9,borderRadius:9,backgroundColor:'#224B37',borderWidth:1,borderColor:'#638F70'},
+  v058InfoText:{fontSize:11,color:'#F8F5E9',fontWeight:'700',textAlign:'center'},
+  v058ShowdownPanel:{backgroundColor:'#10241C',borderColor:'#2D5744',borderWidth:1,borderRadius:12,padding:11,marginTop:7,gap:7},
+  v058Subtext:{fontSize:10,color:'#9DBBAB',lineHeight:15},
+  v058ResultRow:{paddingVertical:5,borderBottomColor:'#34513F',borderBottomWidth:1},
+  v058ResultName:{fontWeight:'800',fontSize:12,color:'#F8F5E9'},
+  v058ResultHand:{fontSize:12,color:'#EAC77E',marginTop:3},
+
   flex: {flex: 1},
   root: {flex: 1, backgroundColor: C.bg},
   homeContent: {paddingHorizontal: 22, paddingTop: 22, paddingBottom: 38},
