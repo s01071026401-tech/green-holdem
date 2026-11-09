@@ -7,6 +7,7 @@ export class Holdem {
   players:Player[]=[]; street:Street='waiting'; board:Card[]=[]; deck:Card[]=[];
   dealer=-1; turn=-1; currentBet=0; minRaise=100; smallBlind=50; bigBlind=100;
   handNo=0; log:string[]=[]; reveal:Record<string,Card[]>={}; lastPots:Pot[]=[];
+  result:{winners:{id:string;name:string;amount:number;handName:string}[]}|null=null;
   add(id:string,name:string) {
     if(this.players.some(p=>p.id===id)) throw new Error('이미 참여한 플레이어');
     if(this.players.length>=6)throw new Error('최대 6명');
@@ -43,7 +44,7 @@ export class Holdem {
     this.players=this.players.filter(p=>p.connected);
     const ready=this.eligible();
     if(ready.length<2)throw new Error('칩이 남은 참가자가 최소 2명 필요');
-    this.handNo++;this.street='preflop';this.board=[];this.deck=newDeck();this.log=[];this.reveal={};this.lastPots=[];
+    this.handNo++;this.street='preflop';this.board=[];this.deck=newDeck();this.log=[];this.reveal={};this.lastPots=[];this.result=null;
     this.dealer=this.nextSeat(this.dealer,p=>p.connected&&p.stack>0)!.seat;
     for(const p of this.players) {
       p.hole=[];p.folded=!(p.connected&&p.stack>0);p.allIn=false;
@@ -105,15 +106,12 @@ export class Holdem {
     if(this.remaining().length===1){this.settle();return;}
     // No one may continue betting if there are <=1 actionable players and all others are all-in.
     const actionable=this.players.filter(p=>this.canAct(p)&&p.hole.length);
-    const pending=this.players.filter(p=>this.needsAction(p)&&p.hole.length);
+    const pending=this.players.filter(p=>this.needsAction(p)&&p.hole.length>0);
     if(actionable.length<=1 && (!actionable.length || actionable[0].streetBet>=this.currentBet)) {
       this.runout();return;
     }
     if(pending.length===0){this.nextStreet();return;}
-    const next=this.nextSeat(
-  this.turn < 0 ? this.dealer : this.turn,
-  p => this.needsAction(p) && p.hole.length > 0
-);
+    const next=this.nextSeat(this.turn<0?this.dealer:this.turn,p=>this.needsAction(p)&&p.hole.length>0);
     this.turn=next?.seat??-1;
   }
   private nextStreet(){
@@ -154,6 +152,7 @@ export class Holdem {
     const scores=new Map<string,number[]>();
     for(const p of survivors){if(this.board.length===5)scores.set(p.id,bestOfSeven([...p.hole,...this.board]));this.reveal[p.id]=[...p.hole];}
     const pots=this.pots();this.lastPots=pots;
+    const paid=new Map<string,{id:string;name:string;amount:number;handName:string}>();
     for(const pot of pots) {
       const eligible=survivors.filter(p=>pot.eligible.includes(p.id));
       if(eligible.length===0)throw new Error('팟 정산 오류');
@@ -165,9 +164,14 @@ export class Holdem {
       const each=Math.floor(pot.amount/winners.length);let odd=pot.amount%winners.length;
       // Odd chips go clockwise from the button.
       winners.sort((a,b)=>((a.seat-this.dealer+6)%6)-((b.seat-this.dealer+6)%6));
-      for(const p of winners){p.stack+=each+(odd>0?1:0);if(odd>0)odd--;}
+      for(const p of winners){
+        const payment=each+(odd>0?1:0);p.stack+=payment;if(odd>0)odd--;
+        const record=paid.get(p.id)||{id:p.id,name:p.name,amount:0,handName:scores.has(p.id)?HAND_NAMES[scores.get(p.id)![0]]:'상대 폴드'};
+        record.amount+=payment;paid.set(p.id,record);
+      }
       this.log.unshift(`${winners.map(p=>p.name).join(', ')} +${pot.amount}칩${eligible.length>1?' · '+HAND_NAMES[scores.get(winners[0].id)![0]]:''}`);
     }
+    this.result={winners:[...paid.values()]};
     this.street='showdown';this.turn=-1;this.currentBet=0;
     const total=this.players.reduce((s,p)=>s+p.stack,0);
     if(total!==this.players.length*10000) {
@@ -178,7 +182,7 @@ export class Holdem {
   view(forId:string){
     return {
       street:this.street,board:this.board,dealer:this.dealer,turn:this.turn,currentBet:this.currentBet,minRaise:this.minRaise,
-      bigBlind:this.bigBlind,handNo:this.handNo,log:this.log.slice(0,12),pots:this.active()?this.pots():this.lastPots,
+      bigBlind:this.bigBlind,handNo:this.handNo,log:this.log.slice(0,12),pots:this.active()?this.pots():this.lastPots,result:this.result,
       totalPot:this.players.reduce((sum,p)=>sum+p.totalBet,0),
       players:this.players.map(p=>({id:p.id,name:p.name,seat:p.seat,stack:p.stack,folded:p.folded,allIn:p.allIn,streetBet:p.streetBet,totalBet:p.totalBet,connected:p.connected,
         hole:p.id===forId?p.hole:(this.street==='showdown'?this.reveal[p.id]||[]:[]),cardsCount:p.hole.length})),

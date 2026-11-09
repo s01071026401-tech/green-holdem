@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@colyseus/sdk": "^0.17.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~58.0.23",
     "expo-status-bar": "~58.0.4",
     "react": "19.3.0",

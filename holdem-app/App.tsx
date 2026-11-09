@@ -1,105 +1,612 @@
-import React,{useEffect,useRef,useState} from 'react';
-import {SafeAreaView,ScrollView,View,Text,TextInput,TouchableOpacity,StyleSheet,Alert,KeyboardAvoidingView,Platform,ActivityIndicator} from 'react-native';
+import React, {useEffect, useRef, useState} from 'react';
+import {
+  ActivityIndicator, Alert, Animated, Easing, KeyboardAvoidingView, Platform, SafeAreaView,
+  ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View,
+  useWindowDimensions,
+} from 'react-native';
 import {Client, type Room} from '@colyseus/sdk';
 import {StatusBar} from 'expo-status-bar';
-import type {Snapshot,Move,PlayerView} from './src/types';
-const SERVER = 'http://10.0.80.112:2567'; // 배포 후 HTTPS 주소로 교체
-const green='#075c3a',light='#e8f4e9',gold='#f5cf79';
-const cardText=(c:string)=>c?`${'23456789TJQKA'.includes(c[0])&&c[0]==='T'?'10':c[0]}${({s:'♠',h:'♥',d:'♦',c:'♣'} as Record<string,string>)[c[1]]||''}`:'?';
-function Card({code,back=false}:{code?:string;back?:boolean}){
-  const red=code?.endsWith('h')||code?.endsWith('d');
-  return <View style={[styles.card,back&&styles.back]}><Text style={{fontWeight:'900',fontSize:18,color:back?gold:red?'#c0293e':'#111'}}>{back?'★':cardText(code||'')}</Text></View>;
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import {BetSizing, pickRaise, type BetPreset} from './src/components/BetSizing';
+import {ShowdownBanner} from './src/components/ShowdownBanner';
+import {TurnClock} from './src/components/TurnClock';
+import type {Snapshot, Move, PlayerView} from './src/types';
+import {estimateEquity, type EquityResult} from './src/game/equity';
+
+// 검증된 온라인 서버 주소를 유지합니다.
+const SERVER = 'https://green-holdem-server.onrender.com';
+const SESSION_KEY = 'greenholdem-reconnect-v05';
+const C = {
+  bg: '#07130F', surface: '#10241C', elevated: '#17352A',
+  felt: '#08633C', feltInner: '#087548', rail: '#704B29',
+  railLight: '#AD8753', gold: '#EAC77E', goldBright: '#F7DC9A',
+  ivory: '#F8F5E9', muted: '#9DBBAB', line: '#2D5744',
+  red: '#D7565D', blue: '#3979A3', green: '#247D54',
+};
+const ranks: Record<string, string> = {T: '10', J: 'J', Q: 'Q', K: 'K', A: 'A'};
+const suits: Record<string, string> = {s: '♠', h: '♥', d: '♦', c: '♣'};
+const cardText = (code: string) => code ? `${ranks[code[0]] ?? code[0]}${suits[code[1]] ?? ''}` : '';
+const formatChips = (n: number) => (n ?? 0).toLocaleString();
+
+type ButtonTone = 'gold' | 'green' | 'outline' | 'red' | 'blue';
+function Button({title, onPress, disabled = false, tone = 'gold', compact = false}: {
+  title: string; onPress: () => void; disabled?: boolean; tone?: ButtonTone; compact?: boolean;
+}) {
+  return (
+    <TouchableOpacity activeOpacity={0.8} accessibilityRole="button" onPress={onPress} disabled={disabled}
+      style={[styles.button, styles[`button_${tone}`], compact && styles.buttonCompact, disabled && styles.disabled]}>
+      <Text style={[styles.buttonText, tone === 'gold' && styles.buttonTextDark, compact && styles.buttonTextCompact]}>{title}</Text>
+    </TouchableOpacity>
+  );
 }
-function Btn({title,onPress,disabled=false,secondary=false}:{title:string;onPress:()=>void;disabled?:boolean;secondary?:boolean}){
-  return <TouchableOpacity onPress={onPress} disabled={disabled} style={[styles.btn,secondary&&styles.secondary,disabled&&{opacity:.35}]}><Text style={[styles.btnText,secondary&&{color:light}]}>{title}</Text></TouchableOpacity>;
+function PlayingCard({code, back = false, small = false}: {code?: string; back?: boolean; small?: boolean}) {
+  const isRed = code?.endsWith('h') || code?.endsWith('d');
+  return (
+    <View style={[styles.playCard, small && styles.playCardSmall, back && styles.playCardBack, !code && !back && styles.playCardEmpty]}>
+      {back ? <Text style={[styles.playCardBackText, small && {fontSize: 14}]}>♠</Text>
+        : code ? <Text style={[styles.playCardText, small && {fontSize: 14}, isRed && {color: '#BE3042'}]}>{cardText(code)}</Text>
+          : <Text style={styles.playCardPlaceholder}>·</Text>}
+    </View>
+  );
 }
-export default function App(){
-  const [name,setName]=useState('Player'+Math.floor(Math.random()*900+100));
-  const [code,setCode]=useState('');const [room,setRoom]=useState<Room|null>(null);
-  const roomRef=useRef<Room|null>(null);const [state,setState]=useState<Snapshot|null>(null);
-  const [busy,setBusy]=useState(false);const [raise,setRaise]=useState('200');
-  const connect=async(kind:'create'|'join'|'solo')=>{
-    if(!name.trim())return Alert.alert('알림','닉네임을 입력하세요');
-    if(kind==='join'&&!code.trim())return Alert.alert('알림','초대 코드를 입력하세요');
-    setBusy(true);
-    try{
-      const client=new Client(SERVER);
-      const joined=kind!=='join'?await client.create('holdem',{name:name.trim()}):await client.joinById(code.trim(),{name:name.trim()});
-      roomRef.current=joined;setRoom(joined);
-      joined.onMessage('snapshot',(next:Snapshot)=>setState(next));
-      joined.onMessage('gameError',(msg:string)=>Alert.alert('게임 알림',msg));
-      joined.onError((_code:number,msg?:string)=>Alert.alert('네트워크 오류',msg ?? '연결 오류'));
-      joined.onLeave(()=>{if(roomRef.current===joined){roomRef.current=null;setRoom(null);setState(null);Alert.alert('연결 종료','방에서 나왔거나 서버 연결이 끊어졌습니다.');}});
-      joined.send('refresh');
-      if(kind==='solo') joined.send('addBot',{count:2});
-    }catch(e){Alert.alert('접속 실패',e instanceof Error?e.message:String(e));}
-    finally{setBusy(false);}
-  };
-  const exit=async()=>{const r=roomRef.current;roomRef.current=null;setRoom(null);setState(null);if(r)await r.leave();};
-  useEffect(()=>()=>{void roomRef.current?.leave();},[]);
-  const me=state?.players.find(p=>p.id===state.you);
-  const myTurn=!!(state&&me&&state.turn===me.seat);
-  const toCall=me&&state?Math.max(0,state.currentBet-me.streetBet):0;
-  const maxTotal=me?me.streetBet+me.stack:0;
-  const minTotal=state?state.currentBet+state.minRaise:0;
-  const send=(move:Move,amount?:number)=>roomRef.current?.send('move',{move,amount});
-  const start=()=>roomRef.current?.send('start');
-  if(!room||!state)return <SafeAreaView style={styles.root}><StatusBar style="light"/><ScrollView contentContainerStyle={styles.lobby} keyboardShouldPersistTaps="handled">
-    <Text style={styles.logo}>♠ GREEN HOLDEM ♥</Text><Text style={styles.sub}>친구와 함께하는 6인 텍사스 홀덤</Text>
-    <Text style={styles.label}>닉네임</Text><TextInput style={styles.input} value={name} onChangeText={setName} maxLength={14} placeholderTextColor="#a9c4b4"/>
-    <Btn title="새 비공개 방 만들기" disabled={busy} onPress={()=>void connect('create')}/>
-    <Btn title="혼자 연습하기 (AI 2명)" disabled={busy} secondary onPress={()=>void connect('solo')}/>
-    <Text style={[styles.label,{marginTop:25}]}>친구에게 받은 초대 코드</Text>
-    <TextInput style={styles.input} value={code} onChangeText={setCode} autoCapitalize="none" autoCorrect={false} placeholder="방 코드를 붙여넣으세요" placeholderTextColor="#a9c4b4"/>
-    <Btn title="코드로 입장" disabled={busy} onPress={()=>void connect('join')}/>
-    {busy&&<ActivityIndicator color={gold} style={{marginTop:20}}/>}
-    <Text style={styles.tip}>서버: {SERVER}{'\n'}무료 게임 칩 전용 · 환전 불가</Text>
-  </ScrollView></SafeAreaView>;
-  const seated=[...state.players].sort((a,b)=>a.seat-b.seat);
-  return <SafeAreaView style={styles.root}><StatusBar style="light"/><KeyboardAvoidingView style={{flex:1}} behavior={Platform.OS==='ios'?'padding':undefined}>
-    <ScrollView contentContainerStyle={{padding:12,paddingBottom:45}} keyboardShouldPersistTaps="handled">
-      <View style={styles.top}><Text style={styles.logoSmall}>♠ GREEN HOLDEM</Text><Btn title="나가기" secondary onPress={()=>void exit()}/></View>
-      <Text style={styles.roomCode}>초대 코드: {room.roomId}</Text>
-      <Text selectable style={styles.tip}>친구에게 위 코드 전체를 보내세요. 최대 6명. AI와 연습도 가능합니다.</Text>
-      {state.street==='waiting'||state.street==='showdown'?<Btn title="AI 상대 1명 추가" secondary disabled={state.players.length>=6} onPress={()=>roomRef.current?.send('addBot',{count:1})}/>:null}
-      <View style={styles.table}>
-        <Text style={styles.tableTitle}>HAND #{state.handNo}  ·  {state.street.toUpperCase()}</Text>
-        <View style={styles.players}>
-          {seated.map(p=><PlayerSeat key={p.id} p={p} dealer={state.dealer===p.seat} turn={state.turn===p.seat} mine={p.id===state.you}/>)}
-        </View>
-        <Text style={styles.pot}>POT {state.totalPot.toLocaleString()} 칩</Text>
-        <View style={styles.board}>{Array.from({length:5},(_,i)=><Card key={i} code={state.board[i]}/>)}</View>
-        <Text style={styles.small}>현재 총 베팅 {state.currentBet} · 최소 레이즈 증가분 {state.minRaise}</Text>
-      </View>
-      <Text style={styles.heading}>내 카드 · {me?.name||''}</Text>
-      <View style={styles.myCards}>{me?.hole.map((c,i)=><Card code={c} key={i}/>)||null}<Text style={styles.stack}>잔여 {me?.stack.toLocaleString()} 칩</Text></View>
-      {state.street==='waiting'||state.street==='showdown'?<Btn title={state.street==='waiting'?'게임 시작 (2명 이상)':'다음 핸드 시작'} disabled={state.players.filter(p=>p.connected&&p.stack>0).length<2} onPress={start}/>:null}
-      {myTurn&&me&&!me.folded&&!me.allIn?<View style={styles.actions}>
-        <Text style={styles.heading}>내 차례 · 콜 필요 금액 {Math.min(toCall,me.stack)}</Text>
-        <View style={styles.actionRow}>
-          <Btn title="폴드" secondary onPress={()=>send('fold')}/>
-          {toCall===0?<Btn title="체크" onPress={()=>send('check')}/>:<Btn title={`콜 ${Math.min(toCall,me.stack)}`} onPress={()=>send('call')}/>}
-          <Btn title="올인" onPress={()=>send('allin')}/>
-        </View>
-        <Text style={styles.label}>레이즈 총 베팅액 (현재 거리 베팅 포함)</Text>
-        <Text style={styles.small}>보통 최소 {minTotal} ~ 최대 {maxTotal} · 부족하면 올인 버튼 사용</Text>
-        <TextInput keyboardType="number-pad" style={styles.input} value={raise} onChangeText={setRaise}/>
-        <Btn title="레이즈" disabled={!Number.isSafeInteger(Number(raise))||Number(raise)<minTotal||Number(raise)>maxTotal} onPress={()=>send('raise',Number(raise))}/>
-      </View>:<Text style={styles.waiting}>{state.street==='showdown'?'핸드가 종료되었습니다.':myTurn?'올인 또는 폴드 상태입니다.':'다른 플레이어의 행동을 기다리는 중...'}</Text>}
-      <Text style={styles.heading}>플레이 기록</Text>
-      {state.log.map((line,i)=><Text style={styles.log} key={i}>• {line}</Text>)}
-      <Text style={styles.tip}>연결 종료 시 현재 핸드에서 폴드 처리됩니다. 서버가 재시작되면 방과 칩 기록이 초기화됩니다.</Text>
-    </ScrollView></KeyboardAvoidingView></SafeAreaView>;
+// Cards animate only when actually dealt / revealed, not on every state update.
+function DealtCard({code, order, small = false, back = false}: {code?: string; order: number; small?: boolean; back?: boolean}) {
+  const drop = useRef(new Animated.Value(-125)).current;
+  const fade = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    drop.setValue(-125); fade.setValue(0);
+    const motion = Animated.parallel([
+      Animated.timing(drop, {toValue: 0, duration: 460, delay: order * 160, easing: Easing.out(Easing.cubic), useNativeDriver: true}),
+      Animated.timing(fade, {toValue: 1, duration: 250, delay: order * 160, useNativeDriver: true}),
+    ]);
+    motion.start();
+    return () => motion.stop();
+  }, [code, back, order, drop, fade]);
+  return <Animated.View style={{transform: [{translateY: drop}], opacity: fade}}><PlayingCard code={code} back={back} small={small}/></Animated.View>;
 }
-function PlayerSeat({p,dealer,turn,mine}:{p:PlayerView;dealer:boolean;turn:boolean;mine:boolean}){
-  return <View style={[styles.seat,turn&&styles.turn,mine&&styles.mine]}>
-    <Text numberOfLines={1} style={styles.seatName}>{p.name}{dealer?' Ⓓ':''}</Text>
-    <Text style={styles.seatChip}>{p.stack.toLocaleString()} 칩</Text>
-    <Text style={styles.seatBet}>베팅 {p.streetBet}{p.allIn?' · ALL-IN':''}</Text>
-    <View style={{flexDirection:'row',gap:2}}>{p.hole.length?p.hole.map((c,i)=><Text key={i} style={styles.miniCard}>{cardText(c)}</Text>):p.cardsCount>0?[0,1].map(i=><Text key={i} style={styles.miniCard}>🂠</Text>):null}</View>
-    {p.folded?<Text style={styles.folded}>FOLD</Text>:!p.connected?<Text style={styles.folded}>OFFLINE</Text>:null}
+function RevealCard({code, order}: {code?: string; order: number}) {
+  const progress = useRef(new Animated.Value(code ? 1 : 0)).current;
+  const [visible, setVisible] = useState(code);
+  useEffect(() => {
+    if (!code) {progress.setValue(0); setVisible(undefined); return;}
+    // Hold the card back while the new community card flips into view.
+    progress.setValue(0);
+    setVisible(code);
+    const motion = Animated.timing(progress, {toValue: 1, duration: 600, delay: order * 170,
+      easing: Easing.inOut(Easing.quad), useNativeDriver: true});
+    motion.start();
+    return () => motion.stop();
+  }, [code, order, progress]);
+  const frontRotate = progress.interpolate({inputRange: [0, 1], outputRange: ['180deg', '360deg']});
+  const backRotate = progress.interpolate({inputRange: [0, 1], outputRange: ['0deg', '180deg']});
+  if (!code) return <PlayingCard/>;
+  return <View style={{width: 43, height: 61}}>
+    <Animated.View style={{position: 'absolute', backfaceVisibility: 'hidden', transform: [{rotateY: backRotate}]}}>
+      <PlayingCard back/>
+    </Animated.View>
+    <Animated.View style={{position: 'absolute', backfaceVisibility: 'hidden', transform: [{rotateY: frontRotate}]}}>
+      <PlayingCard code={visible}/>
+    </Animated.View>
   </View>;
 }
-const styles=StyleSheet.create({
-  root:{flex:1,backgroundColor:'#071d15'},lobby:{padding:24,paddingTop:70,gap:12},logo:{fontSize:28,fontWeight:'900',color:gold,textAlign:'center'},logoSmall:{fontSize:16,fontWeight:'900',color:gold},sub:{color:light,textAlign:'center',fontSize:15,marginBottom:24},label:{color:light,fontSize:13,marginBottom:5},input:{borderColor:'#6d9d84',borderWidth:1,borderRadius:12,padding:12,color:'#fff',backgroundColor:'#123c2c',fontSize:16,marginBottom:8},btn:{backgroundColor:'#dfb751',borderRadius:10,paddingVertical:12,paddingHorizontal:12,alignItems:'center',justifyContent:'center',marginVertical:3,minHeight:44},secondary:{backgroundColor:'#275f4a'},btnText:{color:'#152d22',fontWeight:'800',fontSize:14},tip:{fontSize:12,color:'#adc5b6',marginTop:12,lineHeight:19},top:{flexDirection:'row',alignItems:'center',justifyContent:'space-between'},roomCode:{color:gold,fontWeight:'800',marginTop:8},table:{borderRadius:110,borderWidth:8,borderColor:'#7b5630',backgroundColor:green,minHeight:370,marginTop:16,padding:12,justifyContent:'space-around',alignItems:'center'},tableTitle:{color:gold,fontWeight:'bold',fontSize:12},players:{flexDirection:'row',flexWrap:'wrap',justifyContent:'space-around',width:'100%',gap:6},seat:{width:'30%',minHeight:84,backgroundColor:'#0c3628',borderRadius:10,padding:5,alignItems:'center',borderWidth:1,borderColor:'#3e8060'},turn:{borderColor:gold,borderWidth:3},mine:{backgroundColor:'#205842'},seatName:{color:'#fff',fontSize:11,fontWeight:'800'},seatChip:{color:gold,fontSize:11},seatBet:{color:'#d6e9dc',fontSize:10},miniCard:{fontSize:14,color:'white'},folded:{color:'#ff9999',fontSize:10},pot:{color:gold,fontSize:18,fontWeight:'900',marginTop:10},board:{flexDirection:'row',justifyContent:'center',gap:4,marginVertical:14},card:{width:51,height:72,borderRadius:6,backgroundColor:'#f6f3e9',borderWidth:2,borderColor:'#c8c4b9',justifyContent:'center',alignItems:'center'},back:{backgroundColor:'#145a76',borderColor:'#b3d5e4'},small:{color:'#cce0d2',fontSize:11,textAlign:'center'},heading:{color:gold,fontSize:16,fontWeight:'800',marginTop:22,marginBottom:9},myCards:{flexDirection:'row',alignItems:'center',gap:8},stack:{color:'#fff',fontWeight:'800',marginLeft:14},actions:{marginTop:8},actionRow:{flexDirection:'row',gap:8,justifyContent:'space-between'},waiting:{color:'#cde7d7',marginTop:18},log:{color:'#d2dfd6',paddingVertical:4,fontSize:13}
+
+function ChipPile({large = false}: {large?: boolean}) {
+  return <View style={{height: large ? 26 : 19, width: large ? 62 : 42, justifyContent: 'center', alignItems: 'center'}}>
+    {[2, 1, 0].map(i => <View key={i} style={{position: 'absolute', bottom: 3 + i * (large ? 5 : 4),
+      width: large ? 42 : 29, height: large ? 15 : 11, borderRadius: 50,
+      backgroundColor: i === 0 ? '#DDB958' : '#EDDC9A', borderWidth: 2,
+      borderColor: '#704C2A', transform: [{translateX: i % 2 ? 5 : -2}]}}/>)}
+  </View>;
+}
+type FlyingChip = {id: number; playerId: string; reverse: boolean};
+function MovingChip({fromX, fromY, toX, toY, onDone}: {
+  fromX: number; fromY: number; toX: number; toY: number; onDone: () => void;
+}) {
+  const movement = useRef(new Animated.Value(0)).current;
+  const doneRef = useRef(onDone);
+  doneRef.current = onDone;
+  useEffect(() => {
+    const animation = Animated.timing(movement, {toValue: 1, duration: 620,
+      easing: Easing.inOut(Easing.cubic), useNativeDriver: true});
+    animation.start(({finished}) => {if (finished) doneRef.current();});
+    return () => animation.stop();
+  }, [movement]);
+  return <Animated.View pointerEvents="none" style={{position: 'absolute', left: fromX, top: fromY,
+    zIndex: 40, opacity: movement.interpolate({inputRange: [0, 0.8, 1], outputRange: [1, 1, 0]}),
+    transform: [{translateX: movement.interpolate({inputRange: [0, 1], outputRange: [0, toX - fromX]})},
+      {translateY: movement.interpolate({inputRange: [0, 1], outputRange: [0, toY - fromY]})}]}}>
+    <View style={{height: 21, width: 21, borderRadius: 11, borderWidth: 4, borderColor: '#FCE3A2', backgroundColor: '#BD8B37'}}/>
+  </Animated.View>;
+}
+
+function SectionLabel({children}: {children: React.ReactNode}) {
+  return <Text style={styles.sectionLabel}>{children}</Text>;
+}
+function PlayerSeat({p, dealer, turn, mine, width = 93, blind, handNo = 0}: {
+  p: PlayerView; dealer: boolean; turn: boolean; mine: boolean; width?: number; blind?: 'SB' | 'BB'; handNo?: number;
+}) {
+  return (
+    <View style={[styles.seat, {width}, turn && styles.seatTurn, mine && styles.seatMine, p.folded && styles.seatFolded]}>
+      <View style={styles.seatHeader}>
+        <View style={[styles.seatDot, {backgroundColor: mine ? C.gold : p.connected ? '#55C58C' : '#9B8D8D'}]}/>
+        <Text style={styles.seatName} numberOfLines={1}>{p.name}</Text>
+        {dealer ? <Text style={styles.dealerBadge}>D</Text> : null}
+        {blind ? <Text style={styles.blindBadge}>{blind}</Text> : null}
+      </View>
+      <Text style={styles.seatStack}>◉ {formatChips(p.stack)}</Text>
+      <Text style={styles.seatMeta} numberOfLines={1}>{p.allIn ? 'ALL-IN' : p.folded ? 'FOLD' : !p.connected ? 'OFFLINE' : `베팅 ${formatChips(p.streetBet)}`}</Text>
+      <View style={styles.seatCards}>
+        {p.hole.length ? p.hole.map((c, i) => <DealtCard key={`${handNo}-${i}`} code={c} order={i} small />)
+          : p.cardsCount > 0 ? [0, 1].map(i => <DealtCard key={`${handNo}-${i}`} back small order={i} />) : null}
+      </View>
+    </View>
+  );
+}
+
+export default function App() {
+  const {width: screenWidth} = useWindowDimensions();
+  const [name, setName] = useState('Player' + Math.floor(Math.random() * 900 + 100));
+  const [code, setCode] = useState('');
+  const [room, setRoom] = useState<Room | null>(null);
+  const roomRef = useRef<Room | null>(null);
+  const [state, setState] = useState<Snapshot | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [raise, setRaise] = useState('200');
+  const [aiDifficulty, setAiDifficulty] = useState<'easy'|'medium'|'hard'>('medium');
+  const [connected, setConnected] = useState(true);
+  const [reconnectBusy, setReconnectBusy] = useState(false);
+  const resumeToken = useRef<string | null>(null);
+  const [hasResumeToken,setHasResumeToken]=useState(false);
+  const [deadline, setDeadline] = useState<number>(0);
+
+  const attachRoom = (joined:Room) => {
+    roomRef.current = joined;
+    setRoom(joined);
+    setConnected(true);
+    const saveToken=()=>{
+      const token=joined.reconnectionToken;
+      if(token){resumeToken.current=token;setHasResumeToken(true);void AsyncStorage.setItem(SESSION_KEY,token).catch(()=>{});}
+    };
+    saveToken();
+    joined.onMessage('snapshot',(next:Snapshot)=>{
+      setState(next);
+      if(next.turnRemainingMs !== undefined){
+        setDeadline(next.turnRemainingMs > 0 ? Date.now()+next.turnRemainingMs : 0);
+      }
+    });
+    joined.onMessage('gameError',(msg:string)=>Alert.alert('게임 알림',msg));
+    joined.onError((_code:number,msg?:string)=>Alert.alert('네트워크 오류',msg ?? '연결 오류'));
+    joined.onDrop(()=>setConnected(false));
+    joined.onReconnect(()=>{setConnected(true);saveToken();joined.send('refresh');});
+    joined.onLeave(()=>{
+      if(roomRef.current===joined){
+        roomRef.current=null;setRoom(null);setState(null);setConnected(false);
+        Alert.alert('연결 종료','방 연결이 종료됐습니다. 45초 안이라면 재접속을 시도할 수 있습니다.');
+      }
+    });
+    joined.send('refresh');
+  };
+  const reconnect=async()=>{
+    if(reconnectBusy)return;
+    setReconnectBusy(true);
+    try{
+      const token=resumeToken.current ?? await AsyncStorage.getItem(SESSION_KEY);
+      if(!token)throw new Error('저장된 재접속 정보가 없습니다');
+      // The original seat is held by the server for up to 45 seconds.
+      const joined=await new Client(SERVER).reconnect(token);
+      attachRoom(joined);
+    }catch(err){
+      resumeToken.current=null;setHasResumeToken(false);
+      await AsyncStorage.removeItem(SESSION_KEY).catch(()=>{});
+      Alert.alert('재접속 실패','재접속 제한시간 만료 또는 서버 재시작 가능성이 있습니다. 새 방으로 입장하세요.');
+    }finally{setReconnectBusy(false);}
+  };
+  useEffect(()=>{
+    let alive=true;
+    void AsyncStorage.getItem(SESSION_KEY).then(token=>{
+      if(alive&&token&&!roomRef.current){resumeToken.current=token;setHasResumeToken(true);}
+    }).catch(()=>{});
+    return ()=>{alive=false;};
+  },[]);
+  // 기존 서버 프로토콜과 방/AI 접속 로직은 그대로 보존합니다.
+  const connect = async (kind: 'create' | 'join' | 'solo') => {
+    if (!name.trim()) return Alert.alert('알림', '닉네임을 입력하세요');
+    if (kind === 'join' && !code.trim()) return Alert.alert('알림', '초대 코드를 입력하세요');
+    setBusy(true);
+    try {
+      const client = new Client(SERVER);
+      const joined = kind !== 'join'
+        ? await client.create('holdem', {name: name.trim()})
+        : await client.joinById(code.trim(), {name: name.trim()});
+      attachRoom(joined);
+      if (kind === 'solo') joined.send('addBot', {count: 2, difficulty: aiDifficulty});
+    } catch (e) {
+      Alert.alert('접속 실패', e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const exit = async () => {
+    const r = roomRef.current;
+    resumeToken.current=null;setHasResumeToken(false);void AsyncStorage.removeItem(SESSION_KEY).catch(()=>{});
+    roomRef.current = null;
+    setRoom(null);
+    setState(null);
+    if (r) await r.leave();
+  };
+  useEffect(() => () => {void roomRef.current?.leave();}, []);
+  const me = state?.players.find(p => p.id === state.you);
+  const myTurn = !!(state && me && state.turn === me.seat);
+  const toCall = me && state ? Math.max(0, state.currentBet - me.streetBet) : 0;
+  const maxTotal = me ? me.streetBet + me.stack : 0;
+  const minTotal = state ? state.currentBet + state.minRaise : 0;
+  const send = (move: Move, amount?: number) => {if(connected)roomRef.current?.send('move', {move, amount});};
+  const start = () => {if(connected)roomRef.current?.send('start');};
+  useEffect(()=>{
+    if(!state||!me)return;
+    const min=state.currentBet+state.minRaise,max=me.streetBet+me.stack;
+    setRaise(String(max>=min?Math.min(max,Math.max(min,state.currentBet*2)):max));
+  },[state?.handNo,state?.street,state?.currentBet,state?.minRaise,state?.turn]);
+
+  // The server is authoritative: animate changes only after snapshots arrive.
+  const [flying, setFlying] = useState<FlyingChip[]>([]);
+  const lastSnapshot = useRef<Snapshot | null>(null);
+  const chipSeq = useRef(0);
+  useEffect(() => {
+    if (!state || !room) {lastSnapshot.current = null; setFlying([]); return;}
+    const prev = lastSnapshot.current;
+    lastSnapshot.current = state;
+    if (!prev || prev.handNo !== state.handNo) return;
+    const events: FlyingChip[] = [];
+    for (const p of state.players) {
+      const before = prev.players.find(x => x.id === p.id);
+      if (!before) continue;
+      if (p.totalBet > before.totalBet) events.push({id: ++chipSeq.current, playerId: p.id, reverse: false});
+      if (state.street === 'showdown' && prev.street !== 'showdown' && p.stack > before.stack) {
+        events.push({id: ++chipSeq.current, playerId: p.id, reverse: true});
+      }
+    }
+    if (events.length) setFlying(old => [...old.slice(-8), ...events]);
+  }, [state, room]);
+
+  const equityKey = state && me?.hole.length === 2 && !['waiting', 'showdown'].includes(state.street)
+    ? `${state.handNo}|${me.hole.join(',')}|${state.board.join(',')}|${state.players.filter(p => p.cardsCount > 0 && !p.folded && p.id !== state.you).length}|${me.folded}` : '';
+  const [equity, setEquity] = useState<EquityResult | null>(null);
+  useEffect(() => {
+    setEquity(null);
+    if (!equityKey || !state || !me || me.folded) return;
+    const opponents = state.players.filter(p => p.cardsCount > 0 && !p.folded && p.id !== state.you).length;
+    if (opponents < 1) return;
+    // Schedule after paint to avoid blocking touch feedback.
+    const timer = setTimeout(() => setEquity(estimateEquity(me.hole, state.board, opponents, 500)), 65);
+    return () => clearTimeout(timer);
+  // equityKey captures all equity-relevant values, preventing resimulation on every action.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [equityKey]);
+
+  if (!room || !state) {
+    return (
+      <SafeAreaView style={styles.root}>
+        <StatusBar style="light"/>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.homeContent}>
+          <View style={styles.homeTopRow}>
+            <Text style={styles.overline}>PREMIUM POKER CLUB</Text>
+            <View style={styles.onlinePill}><View style={styles.onlineDot}/><Text style={styles.onlineText}>ONLINE</Text></View>
+          </View>
+          <View style={styles.hero}>
+            <Text style={styles.heroSuit}>♠  ♥  ♣  ♦</Text>
+            <Text style={styles.heroTitle}>GREEN{ '\n' }HOLDEM</Text>
+            <Text style={styles.heroSubtitle}>YOUR TABLE. YOUR GAME.</Text>
+            <View style={styles.heroDivider}/>
+            <Text style={styles.heroDescription}>친구와 함께, 또는 AI와 혼자.{'\n'}언제 어디서나 즐기는 텍사스 홀덤</Text>
+          </View>
+          <View style={styles.homePanel}>
+            <SectionLabel>PLAYER PROFILE</SectionLabel>
+            <Text style={styles.fieldLabel}>닉네임</Text>
+            <TextInput style={styles.textInput} value={name} onChangeText={setName} maxLength={14}
+              placeholder="닉네임 입력" placeholderTextColor="#759682"/>
+            <SectionLabel>AI DIFFICULTY</SectionLabel>
+            <View style={styles.v05DifficultyRow}>
+              {(['easy','medium','hard'] as const).map(level => (
+                <TouchableOpacity key={level} onPress={()=>setAiDifficulty(level)} style={[styles.v05Difficulty,aiDifficulty===level&&styles.v05DifficultySelected]}>
+                  <Text style={[styles.v05DifficultyLabel,aiDifficulty===level&&{color:C.gold}]}>{level==='easy'?'쉬움':level==='medium'?'보통':'어려움'}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            {hasResumeToken?<Button title={reconnectBusy?'재접속 시도 중...':'이전 방 재접속 (45초 이내)'} tone="outline" disabled={reconnectBusy} onPress={()=>void reconnect()}/>:null}
+            <View style={styles.homeButtons}>
+              <Button title="♠  온라인 비공개 방 만들기" disabled={busy} onPress={() => void connect('create')}/>
+              <Button title="♣  혼자 연습하기 · AI 2명" disabled={busy} tone="green" onPress={() => void connect('solo')}/>
+            </View>
+            <View style={styles.divider}/>
+            <SectionLabel>JOIN A PRIVATE TABLE</SectionLabel>
+            <Text style={styles.fieldLabel}>친구에게 받은 방 코드</Text>
+            <TextInput style={styles.textInput} value={code} onChangeText={setCode}
+              autoCapitalize="none" autoCorrect={false} placeholder="초대 코드 입력" placeholderTextColor="#759682"/>
+            <Button title="초대 코드로 입장  →" disabled={busy} tone="outline" onPress={() => void connect('join')}/>
+            {busy ? <ActivityIndicator color={C.gold} style={{marginTop: 14}}/> : null}
+          </View>
+          <View style={styles.homeFooter}>
+            <Text style={styles.footerAccent}>◆  6 PLAYERS MAX   ·   10,000 STARTING CHIPS</Text>
+            <Text style={styles.footerText}>무료 가상 칩 전용 · 현금 거래 및 환전 불가</Text>
+          </View>
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
+  const others = [...state.players].filter(p => p.id !== state.you).sort((a, b) => a.seat - b.seat);
+  const tableWidth = Math.min(screenWidth - 28, 470);
+  const seatWidth = tableWidth < 350 ? 83 : 94;
+  const middleX = (tableWidth - seatWidth) / 2;
+  const xRight = tableWidth - seatWidth - 7;
+  const seats = [
+    {left: middleX, top: 22},
+    {left: 7, top: 49},
+    {left: xRight, top: 49},
+    {left: 7, top: 175},
+    {left: xRight, top: 175},
+  ];
+  const dealtPlayers = [...state.players].filter(p => p.cardsCount > 0).sort((a, b) => a.seat - b.seat);
+  const afterSeat = (seat: number) => dealtPlayers.find(p => p.seat > seat) ?? dealtPlayers[0];
+  const smallBlindSeat = dealtPlayers.length === 2 ? state.dealer : afterSeat(state.dealer)?.seat;
+  const bigBlindSeat = smallBlindSeat === undefined ? undefined : afterSeat(smallBlindSeat)?.seat;
+  const blindOf = (seat: number): 'SB' | 'BB' | undefined =>
+    dealtPlayers.length < 2 ? undefined : seat === smallBlindSeat ? 'SB' : seat === bigBlindSeat ? 'BB' : undefined;
+  const smallBlindAmount = Math.floor(state.bigBlind / 2);
+  const playerPoint = (playerId: string) => {
+    if (playerId === state.you) return {x: tableWidth / 2 - 10, y: 404};
+    const ix = others.findIndex(p => p.id === playerId);
+    const pos = seats[ix];
+    return pos ? {x: pos.left + seatWidth / 2 - 10, y: pos.top + 45} : null;
+  };
+  const handIsOver = state.street === 'waiting' || state.street === 'showdown';
+  const canStart = state.players.filter(p => p.connected && p.stack > 0).length >= 2;
+  const canRaise = connected && Number.isSafeInteger(Number(raise)) && Number(raise) >= minTotal && Number(raise) > 0 && Number(raise) <= maxTotal;
+
+  return (
+    <SafeAreaView style={styles.root}>
+      <StatusBar style="light"/>
+      <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.gameContent}>
+          <View style={styles.gameHeader}>
+            <View>
+              <Text style={styles.gameLogo}>♠  GREEN HOLDEM</Text>
+              <Text style={styles.gameSub}>PRIVATE POKER TABLE</Text>
+            </View>
+            <Button title="나가기" tone="outline" compact onPress={() => void exit()}/>
+          </View>
+          <View style={styles.roomInfo}>
+            <View style={styles.flex}>
+              <Text style={styles.metaLabel}>INVITE CODE</Text>
+              <Text style={styles.roomCode} selectable>{room.roomId}</Text>
+            </View>
+            <View style={styles.roomCount}><Text style={styles.roomCountText}>● {state.players.length} / 6</Text></View>
+          </View>
+          {!connected?<Text style={styles.v05Warning}>네트워크 재접속 중 — 조작이 잠시 제한됩니다</Text>:null}
+          <View style={styles.gameMetaRow}>
+            <Text style={styles.metaLabel}>HAND #{state.handNo}</Text>
+            <Text style={styles.roundPill}>{state.street.toUpperCase()}</Text>
+            <Text style={styles.metaLabel}>SB {smallBlindAmount} / BB {state.bigBlind}</Text>
+          </View>
+
+          {state.turn>=0 && state.street!=='showdown'&&state.street!=='waiting' ? (
+            <TurnClock key={`${state.handNo}-${state.street}-${state.turn}`} deadline={deadline} totalSeconds={state.turnSeconds??30}
+              label={myTurn?'내 차례':'현재 턴 제한시간'}/>
+          ):null}
+          <View style={[styles.tableShell, {width: tableWidth, height: 448}]}>
+            <View style={styles.tableInner}/>
+            <Text style={styles.tableWatermark}>GREEN HOLDEM</Text>
+            {others.map((p, i) => {
+              const pos = seats[i];
+              return pos ? <View key={p.id} style={[styles.seatPosition, {left: pos.left, top: pos.top}]}>
+                <PlayerSeat p={p} dealer={state.dealer === p.seat} turn={state.turn === p.seat} mine={false} width={seatWidth} blind={blindOf(p.seat)} handNo={state.handNo}/>
+              </View> : null;
+            })}
+            <View style={styles.potBlock}>
+              <Text style={styles.potCaption}>TOTAL POT</Text>
+              <ChipPile large/>
+              <Text style={styles.potNumber}>◉ {formatChips(state.totalPot)}</Text>
+            </View>
+            <View style={styles.communityRow}>
+              {Array.from({length: 5}, (_, i) => <RevealCard key={i} code={state.board[i]} order={i % 3}/>)}
+            </View>
+            <View style={styles.mySeatOnTable}>
+              {me ? <PlayerSeat p={me} dealer={state.dealer === me.seat} turn={myTurn} mine width={Math.max(114, seatWidth + 15)} blind={blindOf(me.seat)} handNo={state.handNo}/> : null}
+            </View>
+            {flying.map(event => {
+              const from = playerPoint(event.playerId);
+              if (!from) return null;
+              const pot = {x: tableWidth / 2 - 12, y: 215};
+              const origin = event.reverse ? pot : from;
+              const target = event.reverse ? from : pot;
+              return <MovingChip key={event.id} fromX={origin.x} fromY={origin.y} toX={target.x} toY={target.y}
+                onDone={() => setFlying(old => old.filter(x => x.id !== event.id))}/>;
+            })}
+          </View>
+
+          <View style={styles.myHandPanel}>
+            <View style={styles.myHandHead}>
+              <View>
+                <Text style={styles.metaLabel}>YOUR HAND</Text>
+                <Text style={styles.myName}>{me?.name ?? ''}</Text>
+              </View>
+              <View style={styles.stackPanel}>
+                <Text style={styles.metaLabel}>CHIP BALANCE</Text>
+                <Text style={styles.myStack}>◉ {formatChips(me?.stack ?? 0)}</Text>
+              </View>
+            </View>
+            <View style={styles.myHandRow}>
+              {me?.hole.length ? me.hole.map((c, i) => <DealtCard key={`${state.handNo}-${i}`} code={c} order={i}/>)
+                : <><PlayingCard/><PlayingCard/></>}
+              <Text style={styles.myHandHint}>{state.street === 'waiting' ? '게임 시작을 기다리는 중' : state.street === 'showdown' ? '핸드 종료' : myTurn ? 'YOUR TURN' : '다른 플레이어의 차례'}</Text>
+            </View>
+          </View>
+          {equity ? (
+            <View style={styles.equityPanel}>
+              <View style={styles.equityRow}><Text style={styles.equityTitle}>추정 쇼다운 승률</Text>
+                <Text style={styles.equityValue}>{equity.win.toFixed(1)}%</Text></View>
+              <View style={styles.equityTrack}><View style={[styles.equityFill, {width: `${equity.win}%`}]}/></View>
+              <Text style={styles.equityNote}>무승부 {equity.tie.toFixed(1)}% · 패배 {equity.lose.toFixed(1)}% · 팟 지분 {equity.equity.toFixed(1)}%</Text>
+              <Text style={styles.equityDisclaimer}>상대 카드를 무작위로 가정한 {equity.samples}회 시뮬레이션 추정치 · 확정 확률 아님</Text>
+            </View>
+          ) : null}
+
+          {state.street==='showdown'&&state.result?<ShowdownBanner winners={state.result.winners} you={state.you}/>:null}
+          {handIsOver ? (
+            <View style={styles.controlPanel}>
+              <Button title={state.street === 'waiting' ? '게임 시작 (2명 이상)' : '다음 핸드 시작'} disabled={!canStart} onPress={start}/>
+              <Button title="AI 플레이어 1명 추가" tone="outline" disabled={state.players.length >= 6}
+                onPress={() => roomRef.current?.send('addBot', {count: 1,difficulty:aiDifficulty})}/>
+            </View>
+          ) : myTurn && me && !me.folded && !me.allIn ? (
+            <View style={styles.controlPanel}>
+              <View style={styles.controlTitleRow}>
+                <Text style={styles.controlTitle}>YOUR ACTION</Text>
+                <Text style={styles.callAmount}>콜 필요: {formatChips(Math.min(toCall, me.stack))}</Text>
+              </View>
+              <View style={styles.actionButtons}>
+                <View style={styles.actionButtonWrap}><Button title="폴드" tone="red" compact onPress={() => send('fold')}/></View>
+                <View style={styles.actionButtonWrap}><Button title={toCall === 0 ? '체크' : `콜 ${formatChips(Math.min(toCall, me.stack))}`}
+                  tone="green" compact onPress={() => send(toCall === 0 ? 'check' : 'call')}/></View>
+                <View style={styles.actionButtonWrap}><Button title="올인" tone="blue" compact onPress={() => send('allin')}/></View>
+              </View>
+              <Text style={styles.fieldLabel}>레이즈 총액 (이번 베팅 라운드 기준)</Text>
+              <Text style={styles.raiseHelp}>일반적인 최소 {formatChips(minTotal)} / 최대 {formatChips(maxTotal)} · 그 외 올인은 올인 버튼 사용</Text>
+              <BetSizing minTotal={minTotal} maxTotal={maxTotal} currentBet={state.currentBet} toCall={toCall}
+                pot={state.totalPot} amount={Number(raise)||0}
+                onAmountChange={amount=>setRaise(String(amount))}
+                onPreset={(preset:BetPreset)=>setRaise(String(pickRaise(preset,{
+                  minTotal,maxTotal,currentBet:state.currentBet,toCall,pot:state.totalPot
+                })))}/>
+              <View style={styles.raiseRow}>
+                <TextInput style={[styles.textInput, styles.raiseInput]} keyboardType="number-pad" value={raise} onChangeText={setRaise}/>
+                <View style={styles.raiseButton}><Button title="레이즈" compact disabled={!canRaise||!connected} onPress={() => send('raise', Number(raise))}/></View>
+              </View>
+            </View>
+          ) : (
+            <View style={styles.waitingPanel}>
+              <Text style={styles.waitingText}>{state.street === 'showdown' ? '핸드가 종료되었습니다.' : myTurn ? '현재 올인 또는 폴드 상태입니다.' : '●  다른 플레이어의 행동을 기다리는 중...'}</Text>
+            </View>
+          )}
+
+          <View style={styles.logPanel}>
+            <Text style={styles.controlTitle}>GAME HISTORY</Text>
+            {state.log.map((line, i) => <Text style={styles.logText} key={i}>•  {line}</Text>)}
+          </View>
+          <Text style={styles.footerText}>연결이 끊기면 폴드 처리될 수 있습니다. 서버 재시작 시 방과 칩 기록이 초기화됩니다.</Text>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  flex: {flex: 1},
+  root: {flex: 1, backgroundColor: C.bg},
+  homeContent: {paddingHorizontal: 22, paddingTop: 22, paddingBottom: 38},
+  homeTopRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
+  overline: {fontSize: 10, letterSpacing: 2.2, color: C.gold, fontWeight: '800'},
+  onlinePill: {borderRadius: 30, borderWidth: 1, borderColor: '#376C50', flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 6},
+  onlineDot: {backgroundColor: '#65DF98', width: 6, height: 6, borderRadius: 3},
+  onlineText: {color: '#B0E8C7', fontSize: 10, letterSpacing: 1.2, fontWeight: '800'},
+  hero: {minHeight: 254, paddingTop: 26, alignItems: 'center'},
+  heroSuit: {fontSize: 30, color: C.gold, letterSpacing: 12},
+  heroTitle: {fontSize: 43, lineHeight: 46, letterSpacing: 4, fontWeight: '900', color: C.ivory, textAlign: 'center', marginTop: 14},
+  heroSubtitle: {fontSize: 10, color: C.gold, fontWeight: '800', letterSpacing: 3.2, marginTop: 10},
+  heroDivider: {height: 1, width: 46, backgroundColor: C.railLight, marginTop: 16},
+  heroDescription: {textAlign: 'center', color: C.muted, lineHeight: 19, marginTop: 12, fontSize: 12},
+  homePanel: {backgroundColor: C.surface, borderRadius: 19, borderWidth: 1, borderColor: '#2D4F3F', padding: 18},
+  sectionLabel: {color: C.gold, fontSize: 11, letterSpacing: 1.6, fontWeight: '900', marginBottom: 12},
+  fieldLabel: {color: '#BDD1C5', fontSize: 12, fontWeight: '700', marginBottom: 7},
+  textInput: {height: 49, backgroundColor: '#0A2017', borderRadius: 10, borderWidth: 1, borderColor: '#375847', color: C.ivory, fontSize: 15, paddingHorizontal: 14},
+  homeButtons: {marginTop: 12, gap: 8},
+  button: {minHeight: 50, borderRadius: 11, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 13, borderWidth: 1, borderColor: 'transparent'},
+  button_gold: {backgroundColor: C.gold},
+  button_green: {backgroundColor: C.green, borderColor: '#42976A'},
+  button_outline: {backgroundColor: '#17372A', borderColor: '#466C55'},
+  button_red: {backgroundColor: '#7B333A', borderColor: '#A74A53'},
+  button_blue: {backgroundColor: '#2C4F72', borderColor: '#4476A7'},
+  buttonCompact: {minHeight: 39, paddingHorizontal: 10},
+  buttonText: {fontSize: 14, fontWeight: '900', color: C.ivory},
+  buttonTextDark: {color: '#2A291B'},
+  buttonTextCompact: {fontSize: 12},
+  disabled: {opacity: 0.35},
+  divider: {height: 1, backgroundColor: '#34513F', marginVertical: 19},
+  homeFooter: {alignItems: 'center', paddingTop: 26, gap: 8},
+  footerAccent: {color: C.gold, fontSize: 10, fontWeight: '800', letterSpacing: 1},
+  v05Warning:{backgroundColor:'#672B35',color:'#FFFFFF',padding:10,borderRadius:9,marginTop:8,textAlign:'center',fontWeight:'800'},
+  v05DifficultyRow:{flexDirection:'row',gap:8,marginVertical:8},
+  v05Difficulty:{flex:1,borderRadius:9,paddingVertical:10,alignItems:'center',backgroundColor:'#18382B',borderColor:'#355A44',borderWidth:1},
+  v05DifficultySelected:{borderColor:C.gold,backgroundColor:'#29513A'},
+  v05DifficultyLabel:{color:C.ivory,fontWeight:'800'},
+  footerText: {color: '#7F9C8D', fontSize: 10, textAlign: 'center', lineHeight: 17, marginTop: 10},
+  gameContent: {paddingHorizontal: 14, paddingTop: 12, paddingBottom: 50, alignItems: 'stretch'},
+  gameHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12},
+  gameLogo: {fontSize: 17, fontWeight: '900', color: C.gold, letterSpacing: 1.1},
+  gameSub: {fontSize: 9, letterSpacing: 1.8, color: C.muted, marginTop: 4},
+  roomInfo: {backgroundColor: C.surface, borderRadius: 13, padding: 13, borderWidth: 1, borderColor: C.line, flexDirection: 'row', alignItems: 'center'},
+  metaLabel: {fontSize: 10, fontWeight: '900', letterSpacing: 1.2, color: C.muted},
+  roomCode: {fontSize: 13, color: C.gold, fontWeight: '800', marginTop: 3},
+  roomCount: {backgroundColor: '#1C4A35', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7},
+  roomCountText: {fontSize: 11, color: '#B8E7CE', fontWeight: '800'},
+  gameMetaRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: 13, paddingHorizontal: 4},
+  roundPill: {borderRadius: 16, backgroundColor: '#274A37', paddingHorizontal: 12, paddingVertical: 7, color: C.gold, fontWeight: '900', fontSize: 10, overflow: 'hidden'},
+  tableShell: {alignSelf: 'center', position: 'relative', borderRadius: 170, borderWidth: 10, borderColor: C.rail, backgroundColor: C.felt, overflow: 'hidden', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 14, elevation: 8},
+  tableInner: {position: 'absolute', left: 8, right: 8, top: 8, bottom: 8, borderRadius: 165, borderWidth: 2, borderColor: '#479E70', backgroundColor: C.feltInner, opacity: 0.38},
+  tableWatermark: {position: 'absolute', top: 162, fontSize: 14, fontWeight: '900', letterSpacing: 3.5, color: '#559C71', opacity: 0.5},
+  seatPosition: {position: 'absolute'},
+  seat: {backgroundColor: '#12342A', borderColor: '#396F54', borderWidth: 1.5, borderRadius: 12, paddingHorizontal: 4, paddingVertical: 6, alignItems: 'center', minHeight: 78},
+  seatTurn: {borderColor: C.gold, borderWidth: 2.5, backgroundColor: '#22593F'},
+  seatMine: {backgroundColor: '#244734'},
+  seatFolded: {opacity: 0.48},
+  seatHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, width: '100%'},
+  seatDot: {height: 6, width: 6, borderRadius: 3},
+  seatName: {fontWeight: '800', fontSize: 10, color: C.ivory, flexShrink: 1},
+  dealerBadge: {fontSize: 10, fontWeight: '900', color: '#232015', backgroundColor: C.gold, borderRadius: 7, overflow: 'hidden', paddingHorizontal: 4},
+  seatStack: {fontSize: 10, color: C.gold, fontWeight: '800', marginTop: 3},
+  seatMeta: {fontSize: 9, color: '#B0CAB9', marginTop: 3},
+  seatCards: {flexDirection: 'row', gap: 3, marginTop: 3},
+  blindBadge: {fontSize: 9, fontWeight: '900', color: '#FFFFFF', backgroundColor: '#7D5933', borderRadius: 5, overflow: 'hidden', paddingHorizontal: 3},
+  potBlock: {position: 'absolute', top: 202, alignItems: 'center', backgroundColor: 'rgba(5,40,28,0.6)', borderRadius: 13, paddingHorizontal: 15, paddingVertical: 6},
+  potCaption: {fontSize: 9, letterSpacing: 1.4, color: '#D1E9D6', fontWeight: '800'},
+  potNumber: {fontSize: 19, fontWeight: '900', color: C.gold},
+  communityRow: {position: 'absolute', top: 265, flexDirection: 'row', gap: 4},
+  mySeatOnTable: {position: 'absolute', bottom: 10, alignSelf: 'center'},
+  playCard: {width: 43, height: 61, backgroundColor: '#F8F6ED', borderRadius: 7, borderWidth: 1.5, borderColor: '#D5D0C5', alignItems: 'center', justifyContent: 'center'},
+  playCardSmall: {width: 24, height: 32, borderRadius: 4},
+  playCardBack: {backgroundColor: '#1B5972', borderColor: '#C8DDE1'},
+  playCardEmpty: {backgroundColor: 'rgba(6,61,41,0.4)', borderColor: '#50A275'},
+  playCardBackText: {color: '#DFD8A4', fontSize: 24},
+  playCardText: {fontWeight: '900', fontSize: 18, color: '#192017'},
+  playCardPlaceholder: {color: '#78BA8C', fontSize: 20},
+  myHandPanel: {marginTop: 16, backgroundColor: C.surface, borderWidth: 1, borderColor: C.line, borderRadius: 15, padding: 15},
+  myHandHead: {flexDirection: 'row', justifyContent: 'space-between'},
+  myName: {fontSize: 16, color: C.ivory, fontWeight: '900', marginTop: 4},
+  stackPanel: {alignItems: 'flex-end'},
+  myStack: {fontSize: 18, color: C.gold, fontWeight: '900', marginTop: 4},
+  myHandRow: {flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12},
+  myHandHint: {color: C.muted, fontWeight: '800', marginLeft: 12, fontSize: 12, flex: 1},
+  equityPanel: {marginTop: 12, padding: 13, backgroundColor: C.surface, borderRadius: 12, borderWidth: 1, borderColor: C.line},
+  equityRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
+  equityTitle: {color: C.ivory, fontWeight: '800', fontSize: 13},
+  equityValue: {color: C.gold, fontSize: 21, fontWeight: '900'},
+  equityTrack: {marginTop: 9, height: 9, backgroundColor: '#294438', borderRadius: 8, overflow: 'hidden'},
+  equityFill: {height: '100%', backgroundColor: '#DDB958', borderRadius: 8},
+  equityNote: {fontSize: 11, color: C.ivory, marginTop: 8},
+  equityDisclaimer: {fontSize: 10, color: C.muted, marginTop: 6, lineHeight: 15},
+  controlPanel: {backgroundColor: C.surface, borderWidth: 1, borderColor: C.line, padding: 14, borderRadius: 15, marginTop: 13, gap: 9},
+  controlTitleRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
+  controlTitle: {fontSize: 11, letterSpacing: 1.6, fontWeight: '900', color: C.gold},
+  callAmount: {fontSize: 12, fontWeight: '800', color: C.ivory},
+  actionButtons: {flexDirection: 'row', gap: 7},
+  actionButtonWrap: {flex: 1},
+  raiseHelp: {color: C.muted, fontSize: 10, lineHeight: 15},
+  raiseRow: {flexDirection: 'row', gap: 8},
+  raiseInput: {flex: 1},
+  raiseButton: {width: 102},
+  waitingPanel: {marginTop: 12, borderWidth: 1, borderColor: C.line, backgroundColor: C.surface, padding: 14, borderRadius: 12},
+  waitingText: {textAlign: 'center', color: C.muted, fontSize: 12},
+  logPanel: {backgroundColor: C.surface, marginTop: 14, padding: 15, borderRadius: 13, borderWidth: 1, borderColor: C.line, gap: 7},
+  logText: {fontSize: 12, color: '#C4DACB', lineHeight: 17},
 });
