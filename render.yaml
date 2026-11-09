@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: green-holdem-server
+    runtime: node
+    rootDir: holdem-server
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production

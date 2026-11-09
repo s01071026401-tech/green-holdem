@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "Green Holdem",
+    "slug": "green-holdem",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.example.greenholdem"
+    },
+    "android": {
+      "package": "com.example.greenholdem"
+    },
+    "plugins": [
+      "expo-status-bar"
+    ]
+  }
+}
