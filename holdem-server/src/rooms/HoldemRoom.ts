@@ -2,7 +2,7 @@ import {Room, type Client} from 'colyseus';
 import {Holdem, MAX_PLAYERS, type Move} from '../game/engine.js';
 import {decideBot, type Difficulty} from './botStrategy.js';
 const TURN_SECONDS=30;
-const NEXT_HAND_DELAY_MS=10000;
+const NEXT_HAND_DELAY_MS=2000;
 const RECONNECT_SECONDS=45;
 const validDifficulty=(x:unknown):x is Difficulty=>x==='easy'||x==='medium'||x==='hard';
 export class HoldemRoom extends Room {
