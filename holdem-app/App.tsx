@@ -11,7 +11,7 @@ import {BetSizing, pickRaise, type BetPreset} from './src/components/BetSizing';
 import {ShowdownBanner} from './src/components/ShowdownBanner';
 import {TurnClock} from './src/components/TurnClock';
 import type {Snapshot, Move, PlayerView} from './src/types';
-import {estimateEquity, type EquityResult} from './src/game/equity';
+import {estimateEquity, bestSeven, type EquityResult} from './src/game/equity';
 
 // 검증된 온라인 서버 주소를 유지합니다.
 const SERVER = 'https://green-holdem-server.onrender.com';
@@ -27,6 +27,15 @@ const ranks: Record<string, string> = {T: '10', J: 'J', Q: 'Q', K: 'K', A: 'A'};
 const suits: Record<string, string> = {s: '♠', h: '♥', d: '♦', c: '♣'};
 const cardText = (code: string) => code ? `${ranks[code[0]] ?? code[0]}${suits[code[1]] ?? ''}` : '';
 const formatChips = (n: number) => (n ?? 0).toLocaleString();
+const handNames = ['하이카드', '원페어', '투페어', '트리플', '스트레이트', '플러시', '풀하우스', '포카드', '스트레이트 플러시'];
+// The label describes the player's CURRENT made hand, not a predicted future hand.
+function currentHandName(hole: string[], board: string[]): string | null {
+  if (hole.length !== 2) return null;
+  const cards = [...hole, ...board];
+  if (cards.length === 2) return hole[0][0] === hole[1][0] ? '포켓 페어 (원페어)' : '하이카드';
+  if (cards.length < 5 || cards.length > 7) return null;
+  return handNames[bestSeven(cards)[0]] ?? null;
+}
 
 type ButtonTone = 'gold' | 'green' | 'outline' | 'red' | 'blue';
 function Button({title, onPress, disabled = false, tone = 'gold', compact = false}: {
@@ -64,30 +73,47 @@ function DealtCard({code, order, small = false, back = false}: {code?: string; o
   }, [code, back, order, drop, fade]);
   return <Animated.View style={{transform: [{translateY: drop}], opacity: fade}}><PlayingCard code={code} back={back} small={small}/></Animated.View>;
 }
-function RevealCard({code, order}: {code?: string; order: number}) {
-  const progress = useRef(new Animated.Value(code ? 1 : 0)).current;
-  const [visible, setVisible] = useState(code);
+// A single, native-driven 3D flip. Animate only when a NEW board card arrives.
+// The back stays visible during the first half; the face appears after 90°.
+function RevealCard({code, order, compact = false}: {code?: string; order: number; compact?: boolean}) {
+  const rotation = useRef(new Animated.Value(0)).current;
+  const [shownCode, setShownCode] = useState(code);
   useEffect(() => {
-    if (!code) {progress.setValue(0); setVisible(undefined); return;}
-    // Hold the card back while the new community card flips into view.
-    progress.setValue(0);
-    setVisible(code);
-    const motion = Animated.timing(progress, {toValue: 1, duration: 600, delay: order * 170,
-      easing: Easing.inOut(Easing.quad), useNativeDriver: true});
+    if (!code) {
+      rotation.stopAnimation();
+      rotation.setValue(0);
+      setShownCode(undefined);
+      return;
+    }
+    setShownCode(code);
+    rotation.stopAnimation();
+    rotation.setValue(0);
+    const motion = Animated.timing(rotation, {
+      toValue: 1,
+      duration: 760,
+      // The flop comes out in a short cascade; turn/river flip immediately.
+      delay: order * 130,
+      easing: Easing.bezier(0.22, 0.61, 0.36, 1),
+      useNativeDriver: true,
+    });
     motion.start();
     return () => motion.stop();
-  }, [code, order, progress]);
-  const frontRotate = progress.interpolate({inputRange: [0, 1], outputRange: ['180deg', '360deg']});
-  const backRotate = progress.interpolate({inputRange: [0, 1], outputRange: ['0deg', '180deg']});
-  if (!code) return <PlayingCard/>;
-  return <View style={{width: 43, height: 61}}>
-    <Animated.View style={{position: 'absolute', backfaceVisibility: 'hidden', transform: [{rotateY: backRotate}]}}>
-      <PlayingCard back/>
+  }, [code, order, rotation]);
+  const frontTurn = rotation.interpolate({inputRange: [0, 1], outputRange: ['-180deg', '0deg']});
+  const backTurn = rotation.interpolate({inputRange: [0, 1], outputRange: ['0deg', '180deg']});
+  const lift = rotation.interpolate({inputRange: [0, 0.5, 1], outputRange: [0, -5, 0]});
+  const shadow = rotation.interpolate({inputRange: [0, 0.5, 1], outputRange: [0.96, 1.035, 1]});
+  if (!code) return <View style={compact ? styles.communityCardCompact : undefined}><View style={compact ? {transform: [{scale: 0.78}]} : undefined}><PlayingCard/></View></View>;
+  return <Animated.View style={{width: compact ? 34 : 43, height: compact ? 48 : 61, transform: [{translateY: lift}, {scale: shadow}]}}>
+    <Animated.View style={{position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+      backfaceVisibility: 'hidden', transform: [{perspective: 900}, {rotateY: backTurn}]}}>
+      <View style={compact ? styles.communityCardCompact : undefined}><View style={compact ? {transform: [{scale: 0.78}]} : undefined}><PlayingCard back/></View></View>
     </Animated.View>
-    <Animated.View style={{position: 'absolute', backfaceVisibility: 'hidden', transform: [{rotateY: frontRotate}]}}>
-      <PlayingCard code={visible}/>
+    <Animated.View style={{position: 'absolute', top: 0, left: 0, right: 0, bottom: 0,
+      backfaceVisibility: 'hidden', transform: [{perspective: 900}, {rotateY: frontTurn}]}}>
+      <View style={compact ? styles.communityCardCompact : undefined}><View style={compact ? {transform: [{scale: 0.78}]} : undefined}><PlayingCard code={shownCode}/></View></View>
     </Animated.View>
-  </View>;
+  </Animated.View>;
 }
 
 function ChipPile({large = false}: {large?: boolean}) {
@@ -144,7 +170,7 @@ function PlayerSeat({p, dealer, turn, mine, width = 93, blind, handNo = 0}: {
 }
 
 export default function App() {
-  const {width: screenWidth} = useWindowDimensions();
+  const {width: screenWidth, height: screenHeight} = useWindowDimensions();
   const [name, setName] = useState('Player' + Math.floor(Math.random() * 900 + 100));
   const [code, setCode] = useState('');
   const [room, setRoom] = useState<Room | null>(null);
@@ -269,7 +295,7 @@ export default function App() {
     if (events.length) setFlying(old => [...old.slice(-8), ...events]);
   }, [state, room]);
 
-  const equityKey = state && me?.hole.length === 2 && !['waiting', 'showdown'].includes(state.street)
+  const equityKey = aiDifficulty !== 'hard' && state && me?.hole.length === 2 && !['waiting', 'showdown'].includes(state.street)
     ? `${state.handNo}|${me.hole.join(',')}|${state.board.join(',')}|${state.players.filter(p => p.cardsCount > 0 && !p.folded && p.id !== state.you).length}|${me.folded}` : '';
   const [equity, setEquity] = useState<EquityResult | null>(null);
   useEffect(() => {
@@ -283,6 +309,8 @@ export default function App() {
   // equityKey captures all equity-relevant values, preventing resimulation on every action.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [equityKey]);
+  const visibleHand = aiDifficulty === 'easy' && me && state && !me.folded &&
+    !['waiting', 'showdown'].includes(state.street) ? currentHandName(me.hole, state.board) : null;
 
   if (!room || !state) {
     return (
@@ -305,7 +333,7 @@ export default function App() {
             <Text style={styles.fieldLabel}>닉네임</Text>
             <TextInput style={styles.textInput} value={name} onChangeText={setName} maxLength={14}
               placeholder="닉네임 입력" placeholderTextColor="#759682"/>
-            <SectionLabel>AI DIFFICULTY</SectionLabel>
+            <SectionLabel>난이도 · 내 화면 정보 / AI 전략</SectionLabel>
             <View style={styles.v05DifficultyRow}>
               {(['easy','medium','hard'] as const).map(level => (
                 <TouchableOpacity key={level} onPress={()=>setAiDifficulty(level)} style={[styles.v05Difficulty,aiDifficulty===level&&styles.v05DifficultySelected]}>
@@ -313,6 +341,9 @@ export default function App() {
                 </TouchableOpacity>
               ))}
             </View>
+            <Text style={styles.difficultyHelp}>
+              {aiDifficulty === 'easy' ? '쉬움: 내 현재 족보 + 추정 승률 표시' : aiDifficulty === 'medium' ? '보통: 기존 화면 그대로 (추정 승률 표시)' : '어려움: 족보 안내와 추정 승률 숨김'}
+            </Text>
             {hasResumeToken?<Button title={reconnectBusy?'재접속 시도 중...':'이전 방 재접속 (45초 이내)'} tone="outline" disabled={reconnectBusy} onPress={()=>void reconnect()}/>:null}
             <View style={styles.homeButtons}>
               <Button title="♠  온라인 비공개 방 만들기" disabled={busy} onPress={() => void connect('create')}/>
@@ -327,7 +358,7 @@ export default function App() {
             {busy ? <ActivityIndicator color={C.gold} style={{marginTop: 14}}/> : null}
           </View>
           <View style={styles.homeFooter}>
-            <Text style={styles.footerAccent}>◆  6 PLAYERS MAX   ·   10,000 STARTING CHIPS</Text>
+            <Text style={styles.footerAccent}>◆  7 PLAYERS MAX   ·   10,000 STARTING CHIPS</Text>
             <Text style={styles.footerText}>무료 가상 칩 전용 · 현금 거래 및 환전 불가</Text>
           </View>
         </ScrollView>
@@ -335,18 +366,30 @@ export default function App() {
     );
   }
 
-  const others = [...state.players].filter(p => p.id !== state.you).sort((a, b) => a.seat - b.seat);
-  const tableWidth = Math.min(screenWidth - 28, 470);
-  const seatWidth = tableWidth < 350 ? 83 : 94;
+  const heroSeat = me?.seat ?? 0;
+  const others = [...state.players]
+    .filter(p => p.id !== state.you)
+    .sort((a, b) => ((a.seat - heroSeat + 7) % 7) - ((b.seat - heroSeat + 7) % 7));
+  const actionRailWidth = screenWidth < 380 ? 112 : 122;
+  const tableWidth = Math.min(screenWidth - actionRailWidth - 22, 380);
+  const tableHeight = Math.max(340, Math.min(490, Math.round(screenHeight * 0.60)));
+  const seatWidth = tableWidth < 300 ? 70 : 82;
   const middleX = (tableWidth - seatWidth) / 2;
-  const xRight = tableWidth - seatWidth - 7;
-  const seats = [
-    {left: middleX, top: 22},
-    {left: 7, top: 49},
-    {left: xRight, top: 49},
-    {left: 7, top: 175},
-    {left: xRight, top: 175},
+  const xRight = tableWidth - seatWidth + 2;
+  // Clockwise order from every viewer's own seat (always bottom-left).
+  // 7 people: add a right-middle seat, retaining the opposite bottom-right seat.
+  const clockwiseSeats = [
+    {left: -10, top: Math.round(tableHeight * 0.34)}, // left-middle
+    {left: -8, top: Math.round(tableHeight * 0.09)}, // left-upper
+    {left: middleX, top: -6}, // top
+    {left: xRight, top: Math.round(tableHeight * 0.09)}, // right-upper
+    {left: xRight - 10, top: Math.round(tableHeight * 0.40)}, // right-middle (7 players)
+    {left: xRight - 10, top: tableHeight - 108}, // bottom-right
   ];
+  // Retain the existing opposing bottom-right seat for up to 6 players.
+  const seats = others.length <= 5
+    ? [...clockwiseSeats.slice(0, 4), clockwiseSeats[5]]
+    : clockwiseSeats;
   const dealtPlayers = [...state.players].filter(p => p.cardsCount > 0).sort((a, b) => a.seat - b.seat);
   const afterSeat = (seat: number) => dealtPlayers.find(p => p.seat > seat) ?? dealtPlayers[0];
   const smallBlindSeat = dealtPlayers.length === 2 ? state.dealer : afterSeat(state.dealer)?.seat;
@@ -355,10 +398,10 @@ export default function App() {
     dealtPlayers.length < 2 ? undefined : seat === smallBlindSeat ? 'SB' : seat === bigBlindSeat ? 'BB' : undefined;
   const smallBlindAmount = Math.floor(state.bigBlind / 2);
   const playerPoint = (playerId: string) => {
-    if (playerId === state.you) return {x: tableWidth / 2 - 10, y: 404};
+    if (playerId === state.you) return {x: 18, y: tableHeight - 36};
     const ix = others.findIndex(p => p.id === playerId);
     const pos = seats[ix];
-    return pos ? {x: pos.left + seatWidth / 2 - 10, y: pos.top + 45} : null;
+    return pos ? {x: pos.left + seatWidth / 2 - 10, y: pos.top + 52} : null;
   };
   const handIsOver = state.street === 'waiting' || state.street === 'showdown';
   const canStart = state.players.filter(p => p.connected && p.stack > 0).length >= 2;
@@ -368,20 +411,17 @@ export default function App() {
     <SafeAreaView style={styles.root}>
       <StatusBar style="light"/>
       <KeyboardAvoidingView style={styles.flex} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.gameContent}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={[styles.gameContent,{minHeight: screenHeight - 70}]} showsVerticalScrollIndicator={false}>
           <View style={styles.gameHeader}>
             <View>
               <Text style={styles.gameLogo}>♠  GREEN HOLDEM</Text>
-              <Text style={styles.gameSub}>PRIVATE POKER TABLE</Text>
+              
             </View>
             <Button title="나가기" tone="outline" compact onPress={() => void exit()}/>
           </View>
           <View style={styles.roomInfo}>
-            <View style={styles.flex}>
-              <Text style={styles.metaLabel}>INVITE CODE</Text>
-              <Text style={styles.roomCode} selectable>{room.roomId}</Text>
-            </View>
-            <View style={styles.roomCount}><Text style={styles.roomCountText}>● {state.players.length} / 6</Text></View>
+            <Text style={styles.roomCode} selectable>방 {room.roomId}</Text>
+            <Text style={styles.roomCountText}>● {state.players.length}/7</Text>
           </View>
           {!connected?<Text style={styles.v05Warning}>네트워크 재접속 중 — 조작이 잠시 제한됩니다</Text>:null}
           <View style={styles.gameMetaRow}>
@@ -394,7 +434,8 @@ export default function App() {
             <TurnClock key={`${state.handNo}-${state.street}-${state.turn}`} deadline={deadline} totalSeconds={state.turnSeconds??30}
               label={myTurn?'내 차례':'현재 턴 제한시간'}/>
           ):null}
-          <View style={[styles.tableShell, {width: tableWidth, height: 448}]}>
+          <View style={styles.tableAndActions}>
+          <View style={[styles.tableShell, {width: tableWidth, height: tableHeight}]}>
             <View style={styles.tableInner}/>
             <Text style={styles.tableWatermark}>GREEN HOLDEM</Text>
             {others.map((p, i) => {
@@ -408,93 +449,76 @@ export default function App() {
               <ChipPile large/>
               <Text style={styles.potNumber}>◉ {formatChips(state.totalPot)}</Text>
             </View>
-            <View style={styles.communityRow}>
-              {Array.from({length: 5}, (_, i) => <RevealCard key={i} code={state.board[i]} order={i % 3}/>)}
+            <View style={[styles.communityRow,{top:Math.round(tableHeight*0.61)}]}>
+              {Array.from({length: 5}, (_, i) => <RevealCard key={`${state.handNo}-${i}`} code={state.board[i]} order={i < 3 ? i : 0} compact/>)}
             </View>
             <View style={styles.mySeatOnTable}>
-              {me ? <PlayerSeat p={me} dealer={state.dealer === me.seat} turn={myTurn} mine width={Math.max(114, seatWidth + 15)} blind={blindOf(me.seat)} handNo={state.handNo}/> : null}
+              {me ? <PlayerSeat p={me} dealer={state.dealer === me.seat} turn={myTurn} mine width={Math.max(94, seatWidth + 18)} blind={blindOf(me.seat)} handNo={state.handNo}/> : null}
             </View>
             {flying.map(event => {
               const from = playerPoint(event.playerId);
               if (!from) return null;
-              const pot = {x: tableWidth / 2 - 12, y: 215};
+              const pot = {x: tableWidth / 2 - 12, y: Math.round(tableHeight * 0.46)};
               const origin = event.reverse ? pot : from;
               const target = event.reverse ? from : pot;
               return <MovingChip key={event.id} fromX={origin.x} fromY={origin.y} toX={target.x} toY={target.y}
                 onDone={() => setFlying(old => old.filter(x => x.id !== event.id))}/>;
             })}
           </View>
-
-          <View style={styles.myHandPanel}>
-            <View style={styles.myHandHead}>
-              <View>
-                <Text style={styles.metaLabel}>YOUR HAND</Text>
-                <Text style={styles.myName}>{me?.name ?? ''}</Text>
+          <View style={[styles.rightActionRail, {width: actionRailWidth}]}>
+            <Text style={styles.railHeading}>YOUR ACTION</Text>
+            {handIsOver ? (
+              <View style={styles.railControls}>
+                <Button title={state.street === 'waiting' ? '게임 시작' : '다음 핸드'} disabled={!canStart} compact onPress={start}/>
+                <Button title="AI 추가" tone="outline" compact disabled={state.players.length >= 7}
+                  onPress={() => roomRef.current?.send('addBot', {count: 1,difficulty:aiDifficulty})}/>
               </View>
-              <View style={styles.stackPanel}>
-                <Text style={styles.metaLabel}>CHIP BALANCE</Text>
-                <Text style={styles.myStack}>◉ {formatChips(me?.stack ?? 0)}</Text>
+            ) : myTurn && me && !me.folded && !me.allIn ? (
+              <View style={styles.railControls}>
+                <Text style={styles.railCall}>콜 {formatChips(Math.min(toCall, me.stack))}</Text>
+                <Button title="올인" tone="blue" compact onPress={() => send('allin')}/>
+                <Button title={toCall === 0 ? '체크' : '콜'} tone="green" compact onPress={() => send(toCall === 0 ? 'check' : 'call')}/>
+                <Button title="폴드" tone="red" compact onPress={() => send('fold')}/>
+                <View style={styles.railDivider}/>
+                <Text style={styles.railSmallLabel}>레이즈 금액</Text>
+                <TextInput style={styles.railRaiseInput} keyboardType="number-pad" value={raise} onChangeText={setRaise}/>
+                <View style={styles.railPresetRow}>
+                  {(['half','pot'] as BetPreset[]).map(preset => <TouchableOpacity key={preset}
+                    style={styles.railPreset} onPress={() => setRaise(String(pickRaise(preset, {minTotal,maxTotal,currentBet:state.currentBet,toCall,pot:state.totalPot})))}>
+                    <Text style={styles.railPresetText}>{preset === 'half' ? '½팟' : '팟'}</Text>
+                  </TouchableOpacity>)}
+                </View>
+                <Button title="레이즈" compact disabled={!canRaise||!connected} onPress={() => send('raise', Number(raise))}/>
               </View>
-            </View>
-            <View style={styles.myHandRow}>
-              {me?.hole.length ? me.hole.map((c, i) => <DealtCard key={`${state.handNo}-${i}`} code={c} order={i}/>)
-                : <><PlayingCard/><PlayingCard/></>}
-              <Text style={styles.myHandHint}>{state.street === 'waiting' ? '게임 시작을 기다리는 중' : state.street === 'showdown' ? '핸드 종료' : myTurn ? 'YOUR TURN' : '다른 플레이어의 차례'}</Text>
-            </View>
+            ) : (
+              <Text style={styles.railWaiting}>{myTurn ? '올인 / 폴드' : '상대 턴 대기 중'}</Text>
+            )}
           </View>
-          {equity ? (
+          </View>
+
+          {visibleHand ? (
+            <View style={styles.handInfoPanel}>
+              <Text style={styles.handInfoLabel}>현재 내 족보</Text>
+              <Text style={styles.handInfoValue}>{visibleHand}</Text>
+            </View>
+          ) : null}
+          {aiDifficulty !== 'hard' && equity ? (
             <View style={styles.equityPanel}>
               <View style={styles.equityRow}><Text style={styles.equityTitle}>추정 쇼다운 승률</Text>
                 <Text style={styles.equityValue}>{equity.win.toFixed(1)}%</Text></View>
               <View style={styles.equityTrack}><View style={[styles.equityFill, {width: `${equity.win}%`}]}/></View>
               <Text style={styles.equityNote}>무승부 {equity.tie.toFixed(1)}% · 패배 {equity.lose.toFixed(1)}% · 팟 지분 {equity.equity.toFixed(1)}%</Text>
-              <Text style={styles.equityDisclaimer}>상대 카드를 무작위로 가정한 {equity.samples}회 시뮬레이션 추정치 · 확정 확률 아님</Text>
+
             </View>
           ) : null}
 
-          {state.street==='showdown'&&state.result?<ShowdownBanner winners={state.result.winners} you={state.you}/>:null}
-          {handIsOver ? (
-            <View style={styles.controlPanel}>
-              <Button title={state.street === 'waiting' ? '게임 시작 (2명 이상)' : '다음 핸드 시작'} disabled={!canStart} onPress={start}/>
-              <Button title="AI 플레이어 1명 추가" tone="outline" disabled={state.players.length >= 6}
-                onPress={() => roomRef.current?.send('addBot', {count: 1,difficulty:aiDifficulty})}/>
-            </View>
-          ) : myTurn && me && !me.folded && !me.allIn ? (
-            <View style={styles.controlPanel}>
-              <View style={styles.controlTitleRow}>
-                <Text style={styles.controlTitle}>YOUR ACTION</Text>
-                <Text style={styles.callAmount}>콜 필요: {formatChips(Math.min(toCall, me.stack))}</Text>
-              </View>
-              <View style={styles.actionButtons}>
-                <View style={styles.actionButtonWrap}><Button title="폴드" tone="red" compact onPress={() => send('fold')}/></View>
-                <View style={styles.actionButtonWrap}><Button title={toCall === 0 ? '체크' : `콜 ${formatChips(Math.min(toCall, me.stack))}`}
-                  tone="green" compact onPress={() => send(toCall === 0 ? 'check' : 'call')}/></View>
-                <View style={styles.actionButtonWrap}><Button title="올인" tone="blue" compact onPress={() => send('allin')}/></View>
-              </View>
-              <Text style={styles.fieldLabel}>레이즈 총액 (이번 베팅 라운드 기준)</Text>
-              <Text style={styles.raiseHelp}>일반적인 최소 {formatChips(minTotal)} / 최대 {formatChips(maxTotal)} · 그 외 올인은 올인 버튼 사용</Text>
-              <BetSizing minTotal={minTotal} maxTotal={maxTotal} currentBet={state.currentBet} toCall={toCall}
-                pot={state.totalPot} amount={Number(raise)||0}
-                onAmountChange={amount=>setRaise(String(amount))}
-                onPreset={(preset:BetPreset)=>setRaise(String(pickRaise(preset,{
-                  minTotal,maxTotal,currentBet:state.currentBet,toCall,pot:state.totalPot
-                })))}/>
-              <View style={styles.raiseRow}>
-                <TextInput style={[styles.textInput, styles.raiseInput]} keyboardType="number-pad" value={raise} onChangeText={setRaise}/>
-                <View style={styles.raiseButton}><Button title="레이즈" compact disabled={!canRaise||!connected} onPress={() => send('raise', Number(raise))}/></View>
-              </View>
-            </View>
-          ) : (
-            <View style={styles.waitingPanel}>
-              <Text style={styles.waitingText}>{state.street === 'showdown' ? '핸드가 종료되었습니다.' : myTurn ? '현재 올인 또는 폴드 상태입니다.' : '●  다른 플레이어의 행동을 기다리는 중...'}</Text>
-            </View>
-          )}
-
-          <View style={styles.logPanel}>
+          {state.street==='showdown'&&state.result?<ShowdownBanner
+            winners={aiDifficulty === 'hard' ? state.result.winners.map(w => ({...w, handName: ''})) : state.result.winners}
+            you={state.you}/>:null}
+          {handIsOver ? <View style={styles.logPanel}>
             <Text style={styles.controlTitle}>GAME HISTORY</Text>
-            {state.log.map((line, i) => <Text style={styles.logText} key={i}>•  {line}</Text>)}
-          </View>
-          <Text style={styles.footerText}>연결이 끊기면 폴드 처리될 수 있습니다. 서버 재시작 시 방과 칩 기록이 초기화됩니다.</Text>
+            {state.log.slice(-6).map((line, i) => <Text style={styles.logText} key={i}>•  {aiDifficulty === 'hard' ? handNames.reduce((s, name) => s.split(name).join('비공개'), line) : line}</Text>)}
+          </View> : null}
         </ScrollView>
       </KeyboardAvoidingView>
     </SafeAreaView>
@@ -541,21 +565,33 @@ const styles = StyleSheet.create({
   v05DifficultySelected:{borderColor:C.gold,backgroundColor:'#29513A'},
   v05DifficultyLabel:{color:C.ivory,fontWeight:'800'},
   footerText: {color: '#7F9C8D', fontSize: 10, textAlign: 'center', lineHeight: 17, marginTop: 10},
-  gameContent: {paddingHorizontal: 14, paddingTop: 12, paddingBottom: 50, alignItems: 'stretch'},
-  gameHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12},
+  gameContent: {paddingHorizontal: 5, paddingTop: 4, paddingBottom: 10, alignItems: 'stretch'},
+  tableAndActions: {flexDirection: 'row', alignItems: 'stretch', justifyContent: 'center', gap: 6},
+  rightActionRail: {backgroundColor: C.surface, borderColor: C.line, borderWidth: 1, borderRadius: 13, padding: 5, justifyContent: 'flex-start'},
+  railHeading: {fontSize: 10, fontWeight: '900', color: C.gold, textAlign: 'center', marginVertical: 8},
+  railControls: {gap: 6},
+  railCall: {fontSize: 10, color: C.ivory, textAlign: 'center', fontWeight: '700'},
+  railDivider: {height: 1, backgroundColor: C.line, marginVertical: 4},
+  railSmallLabel: {fontSize: 10, color: C.muted, textAlign: 'center'},
+  railRaiseInput: {height: 38, borderRadius: 8, borderWidth: 1, borderColor: C.line, backgroundColor: C.bg, color: C.ivory, textAlign: 'center', fontSize: 13},
+  railPresetRow: {flexDirection: 'row', gap: 4},
+  railPreset: {flex: 1, paddingVertical: 7, borderRadius: 7, backgroundColor: C.elevated, alignItems: 'center'},
+  railPresetText: {fontSize: 10, fontWeight: '800', color: C.ivory},
+  railWaiting: {fontSize: 11, color: C.muted, textAlign: 'center', marginTop: 18},
+  gameHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3},
   gameLogo: {fontSize: 17, fontWeight: '900', color: C.gold, letterSpacing: 1.1},
   gameSub: {fontSize: 9, letterSpacing: 1.8, color: C.muted, marginTop: 4},
-  roomInfo: {backgroundColor: C.surface, borderRadius: 13, padding: 13, borderWidth: 1, borderColor: C.line, flexDirection: 'row', alignItems: 'center'},
+  roomInfo: {paddingHorizontal: 6, paddingVertical: 3, flexDirection: 'row', alignItems: 'center', justifyContent:'space-between'},
   metaLabel: {fontSize: 10, fontWeight: '900', letterSpacing: 1.2, color: C.muted},
   roomCode: {fontSize: 13, color: C.gold, fontWeight: '800', marginTop: 3},
   roomCount: {backgroundColor: '#1C4A35', borderRadius: 16, paddingHorizontal: 12, paddingVertical: 7},
   roomCountText: {fontSize: 11, color: '#B8E7CE', fontWeight: '800'},
-  gameMetaRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: 13, paddingHorizontal: 4},
+  gameMetaRow: {flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: 4, paddingHorizontal: 4},
   roundPill: {borderRadius: 16, backgroundColor: '#274A37', paddingHorizontal: 12, paddingVertical: 7, color: C.gold, fontWeight: '900', fontSize: 10, overflow: 'hidden'},
-  tableShell: {alignSelf: 'center', position: 'relative', borderRadius: 170, borderWidth: 10, borderColor: C.rail, backgroundColor: C.felt, overflow: 'hidden', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 14, elevation: 8},
+  tableShell: {alignSelf: 'center', position: 'relative', borderRadius: 170, borderWidth: 10, borderColor: C.rail, backgroundColor: C.felt, overflow: 'visible', alignItems: 'center', shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 14, elevation: 8},
   tableInner: {position: 'absolute', left: 8, right: 8, top: 8, bottom: 8, borderRadius: 165, borderWidth: 2, borderColor: '#479E70', backgroundColor: C.feltInner, opacity: 0.38},
-  tableWatermark: {position: 'absolute', top: 162, fontSize: 14, fontWeight: '900', letterSpacing: 3.5, color: '#559C71', opacity: 0.5},
-  seatPosition: {position: 'absolute'},
+  tableWatermark: {position: 'absolute', top: 105, fontSize: 14, fontWeight: '900', letterSpacing: 3.5, color: '#559C71', opacity: 0.5},
+  seatPosition: {position: 'absolute', zIndex: 5},
   seat: {backgroundColor: '#12342A', borderColor: '#396F54', borderWidth: 1.5, borderRadius: 12, paddingHorizontal: 4, paddingVertical: 6, alignItems: 'center', minHeight: 78},
   seatTurn: {borderColor: C.gold, borderWidth: 2.5, backgroundColor: '#22593F'},
   seatMine: {backgroundColor: '#244734'},
@@ -568,11 +604,12 @@ const styles = StyleSheet.create({
   seatMeta: {fontSize: 9, color: '#B0CAB9', marginTop: 3},
   seatCards: {flexDirection: 'row', gap: 3, marginTop: 3},
   blindBadge: {fontSize: 9, fontWeight: '900', color: '#FFFFFF', backgroundColor: '#7D5933', borderRadius: 5, overflow: 'hidden', paddingHorizontal: 3},
-  potBlock: {position: 'absolute', top: 202, alignItems: 'center', backgroundColor: 'rgba(5,40,28,0.6)', borderRadius: 13, paddingHorizontal: 15, paddingVertical: 6},
+  potBlock: {position: 'absolute', left: '50%', top: '50%', alignItems: 'center', backgroundColor: 'rgba(5,40,28,0.72)', borderRadius: 13, paddingHorizontal: 15, paddingVertical: 6, transform: [{translateX: -48}, {translateY: -46}], zIndex: 4},
   potCaption: {fontSize: 9, letterSpacing: 1.4, color: '#D1E9D6', fontWeight: '800'},
   potNumber: {fontSize: 19, fontWeight: '900', color: C.gold},
-  communityRow: {position: 'absolute', top: 265, flexDirection: 'row', gap: 4},
-  mySeatOnTable: {position: 'absolute', bottom: 10, alignSelf: 'center'},
+  communityRow: {position: 'absolute', top: 254, flexDirection: 'row', gap: 2, zIndex: 4},
+  communityCardCompact: {width: 34, height: 48, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', borderRadius: 6},
+  mySeatOnTable: {position: 'absolute', bottom: -3, left: -9, zIndex: 6},
   playCard: {width: 43, height: 61, backgroundColor: '#F8F6ED', borderRadius: 7, borderWidth: 1.5, borderColor: '#D5D0C5', alignItems: 'center', justifyContent: 'center'},
   playCardSmall: {width: 24, height: 32, borderRadius: 4},
   playCardBack: {backgroundColor: '#1B5972', borderColor: '#C8DDE1'},
@@ -587,25 +624,29 @@ const styles = StyleSheet.create({
   myStack: {fontSize: 18, color: C.gold, fontWeight: '900', marginTop: 4},
   myHandRow: {flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 12},
   myHandHint: {color: C.muted, fontWeight: '800', marginLeft: 12, fontSize: 12, flex: 1},
-  equityPanel: {marginTop: 12, padding: 13, backgroundColor: C.surface, borderRadius: 12, borderWidth: 1, borderColor: C.line},
+  difficultyHelp: {color: C.muted, fontSize: 11, marginBottom: 8, marginTop: 3},
+  handInfoPanel: {marginTop: 5, paddingHorizontal: 12, paddingVertical: 8, backgroundColor: C.surface, borderRadius: 10, borderWidth: 1, borderColor: C.gold, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between'},
+  handInfoLabel: {fontSize: 11, color: C.ivory, fontWeight: '800'},
+  handInfoValue: {fontSize: 16, color: C.gold, fontWeight: '900'},
+  equityPanel: {marginTop: 5, paddingHorizontal: 9, paddingVertical: 5, backgroundColor: C.surface, borderRadius: 10, borderWidth: 1, borderColor: C.line},
   equityRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
-  equityTitle: {color: C.ivory, fontWeight: '800', fontSize: 13},
-  equityValue: {color: C.gold, fontSize: 21, fontWeight: '900'},
-  equityTrack: {marginTop: 9, height: 9, backgroundColor: '#294438', borderRadius: 8, overflow: 'hidden'},
+  equityTitle: {color: C.ivory, fontWeight: '800', fontSize: 11},
+  equityValue: {color: C.gold, fontSize: 16, fontWeight: '900'},
+  equityTrack: {marginTop: 3, height: 5, backgroundColor: '#294438', borderRadius: 8, overflow: 'hidden'},
   equityFill: {height: '100%', backgroundColor: '#DDB958', borderRadius: 8},
-  equityNote: {fontSize: 11, color: C.ivory, marginTop: 8},
+  equityNote: {fontSize: 10, color: C.ivory, marginTop: 3},
   equityDisclaimer: {fontSize: 10, color: C.muted, marginTop: 6, lineHeight: 15},
-  controlPanel: {backgroundColor: C.surface, borderWidth: 1, borderColor: C.line, padding: 14, borderRadius: 15, marginTop: 13, gap: 9},
+  controlPanel: {backgroundColor: C.surface, borderWidth: 1, borderColor: C.line, padding: 8, borderRadius: 12, marginTop: 5, gap: 4},
   controlTitleRow: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'},
   controlTitle: {fontSize: 11, letterSpacing: 1.6, fontWeight: '900', color: C.gold},
   callAmount: {fontSize: 12, fontWeight: '800', color: C.ivory},
-  actionButtons: {flexDirection: 'row', gap: 7},
+  actionButtons: {flexDirection: 'row', gap: 5},
   actionButtonWrap: {flex: 1},
   raiseHelp: {color: C.muted, fontSize: 10, lineHeight: 15},
   raiseRow: {flexDirection: 'row', gap: 8},
-  raiseInput: {flex: 1},
-  raiseButton: {width: 102},
-  waitingPanel: {marginTop: 12, borderWidth: 1, borderColor: C.line, backgroundColor: C.surface, padding: 14, borderRadius: 12},
+  raiseInput: {flex: 1, height: 40},
+  raiseButton: {width: 96},
+  waitingPanel: {marginTop: 5, borderWidth: 1, borderColor: C.line, backgroundColor: C.surface, padding: 7, borderRadius: 12},
   waitingText: {textAlign: 'center', color: C.muted, fontSize: 12},
   logPanel: {backgroundColor: C.surface, marginTop: 14, padding: 15, borderRadius: 13, borderWidth: 1, borderColor: C.line, gap: 7},
   logText: {fontSize: 12, color: '#C4DACB', lineHeight: 17},

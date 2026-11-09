@@ -3,6 +3,7 @@ export type Move = 'fold'|'check'|'call'|'raise'|'allin';
 export type Street = 'waiting'|'preflop'|'flop'|'turn'|'river'|'showdown';
 export interface Player {id:string;name:string;seat:number;stack:number;hole:Card[];folded:boolean;allIn:boolean;streetBet:number;totalBet:number;acted:boolean;raiseRights:boolean;connected:boolean;}
 export interface Pot {amount:number;eligible:string[];}
+export const MAX_PLAYERS = 7;
 export class Holdem {
   players:Player[]=[]; street:Street='waiting'; board:Card[]=[]; deck:Card[]=[];
   dealer=-1; turn=-1; currentBet=0; minRaise=100; smallBlind=50; bigBlind=100;
@@ -10,9 +11,9 @@ export class Holdem {
   result:{winners:{id:string;name:string;amount:number;handName:string}[]}|null=null;
   add(id:string,name:string) {
     if(this.players.some(p=>p.id===id)) throw new Error('이미 참여한 플레이어');
-    if(this.players.length>=6)throw new Error('최대 6명');
+    if(this.players.length>=MAX_PLAYERS)throw new Error(`최대 ${MAX_PLAYERS}명`);
     const occupied=new Set(this.players.map(p=>p.seat));
-    const seat=[0,1,2,3,4,5].find(s=>!occupied.has(s))!;
+    const seat=Array.from({length:MAX_PLAYERS},(_,i)=>i).find(s=>!occupied.has(s))!;
     this.players.push({id,name:name.slice(0,14)||'Player',seat,stack:10000,hole:[],folded:true,allIn:false,streetBet:0,totalBet:0,acted:false,raiseRights:false,connected:true});
     this.players.sort((a,b)=>a.seat-b.seat);
   }
@@ -29,8 +30,8 @@ export class Holdem {
   active(){return this.street!=='waiting'&&this.street!=='showdown';}
   private eligible(){return this.players.filter(p=>p.connected&&p.stack>0);}
   private nextSeat(from:number,predicate:(p:Player)=>boolean):Player|undefined {
-    for(let i=1;i<=6;i++) {
-      const seat=(from+i+6)%6;const p=this.players.find(p=>p.seat===seat);
+    for(let i=1;i<=MAX_PLAYERS;i++) {
+      const seat=(from+i+MAX_PLAYERS)%MAX_PLAYERS;const p=this.players.find(p=>p.seat===seat);
       if(p&&predicate(p))return p;
     }
   }
@@ -51,8 +52,8 @@ export class Holdem {
       p.streetBet=0;p.totalBet=0;p.acted=false;p.raiseRights=!p.folded;
     }
     // Round-robin dealing; only participating players get cards.
-    for(let r=0;r<2;r++) for(let i=1;i<=6;i++) {
-      const p=this.players.find(p=>p.seat===(this.dealer+i)%6);
+    for(let r=0;r<2;r++) for(let i=1;i<=MAX_PLAYERS;i++) {
+      const p=this.players.find(p=>p.seat===(this.dealer+i)%MAX_PLAYERS);
       if(p&&!p.folded)p.hole.push(this.deck.pop()!);
     }
     const sb=ready.length===2?this.players.find(p=>p.seat===this.dealer)!:this.nextSeat(this.dealer,p=>!p.folded)!;
@@ -163,7 +164,7 @@ export class Holdem {
       }
       const each=Math.floor(pot.amount/winners.length);let odd=pot.amount%winners.length;
       // Odd chips go clockwise from the button.
-      winners.sort((a,b)=>((a.seat-this.dealer+6)%6)-((b.seat-this.dealer+6)%6));
+      winners.sort((a,b)=>((a.seat-this.dealer+MAX_PLAYERS)%MAX_PLAYERS)-((b.seat-this.dealer+MAX_PLAYERS)%MAX_PLAYERS));
       for(const p of winners){
         const payment=each+(odd>0?1:0);p.stack+=payment;if(odd>0)odd--;
         const record=paid.get(p.id)||{id:p.id,name:p.name,amount:0,handName:scores.has(p.id)?HAND_NAMES[scores.get(p.id)![0]]:'상대 폴드'};

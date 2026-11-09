@@ -1,11 +1,11 @@
 import {Room, type Client} from 'colyseus';
-import {Holdem, type Move} from '../game/engine.js';
+import {Holdem, MAX_PLAYERS, type Move} from '../game/engine.js';
 import {decideBot, type Difficulty} from './botStrategy.js';
 const TURN_SECONDS=30;
 const RECONNECT_SECONDS=45;
 const validDifficulty=(x:unknown):x is Difficulty=>x==='easy'||x==='medium'||x==='hard';
 export class HoldemRoom extends Room {
-  maxClients=6;
+  maxClients=MAX_PLAYERS;
   game=new Holdem();
   private botSerial=0;
   private botLevels=new Map<string,Difficulty>();
@@ -18,9 +18,9 @@ export class HoldemRoom extends Room {
     this.onMessage('addBot',(client,msg:{count?:number;difficulty?:Difficulty}|undefined)=>this.safe(client,()=>{
       if(this.game.active())throw new Error('핸드 진행 중에는 봇을 추가할 수 없습니다');
       const count=msg?.count??1;
-      if(!Number.isInteger(count)||count<1||count>5)throw new Error('AI 수는 1~5명');
+      if(!Number.isInteger(count)||count<1||count>6)throw new Error('AI 수는 1~6명');
       const level=validDifficulty(msg?.difficulty)?msg!.difficulty!:'medium';
-      for(let i=0;i<count&&this.game.players.length<6;i++){
+      for(let i=0;i<count&&this.game.players.length<MAX_PLAYERS;i++){
         const n=++this.botSerial,id=`bot-${this.roomId}-${n}`;
         this.game.add(id,`AI ${n} (${level==='easy'?'쉬움':level==='hard'?'어려움':'보통'})`);
         this.botLevels.set(id,level);

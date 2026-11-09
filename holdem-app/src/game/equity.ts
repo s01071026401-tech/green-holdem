@@ -58,7 +58,7 @@ export type EquityResult = {win: number; tie: number; lose: number; equity: numb
 
 /** Returns estimated percentages with tied pots counted fractionally in equity. */
 export function estimateEquity(hole: string[], board: string[], opponents: number, samples = 450): EquityResult | null {
-  if (hole.length !== 2 || opponents < 1 || opponents > 5 || board.length > 5) return null;
+  if (hole.length !== 2 || opponents < 1 || opponents > 6 || board.length > 5) return null;
   const seen = [...hole, ...board];
   if (new Set(seen).size !== seen.length || seen.some(c => !DECK.includes(c))) return null;
   const available = DECK.filter(c => !seen.includes(c));

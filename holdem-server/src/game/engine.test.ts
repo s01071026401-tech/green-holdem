@@ -54,3 +54,27 @@ test('multiple consecutive hands conserve all chips',()=>{
     assert.equal(g.players.reduce((s,p)=>s+p.stack,0),60000);
   }
 });
+
+test('7-player full table deals 2 cards each, advances clockwise and conserves chips',()=>{
+  const g=new Holdem();
+  for(let i=0;i<7;i++)g.add('seven'+i,'Seven '+i);
+  assert.throws(()=>g.add('extra','Extra'),/최대 7명/);
+  g.start();
+  assert.equal(g.players.length,7);
+  assert.ok(g.players.every(p=>p.hole.length===2));
+  assert.equal(g.players.reduce((s,p)=>s+p.stack+p.totalBet,0),70000);
+  let actions=0;
+  while(g.active() && actions++<120){
+    const seatBefore=g.turn;
+    const p=g.players.find(p=>p.seat===seatBefore)!;
+    const due=g.currentBet-p.streetBet;
+    g.action(p.id,due>0?'call':'check');
+    if(g.active()&&g.street!=='showdown'&&g.turn>=0 && g.turn!==seatBefore){
+      assert.ok((g.turn-seatBefore+7)%7>0);
+    }
+  }
+  assert.ok(actions<120);
+  assert.equal(g.street,'showdown');
+  assert.equal(g.board.length,5);
+  assert.equal(g.players.reduce((s,p)=>s+p.stack,0),70000);
+});
