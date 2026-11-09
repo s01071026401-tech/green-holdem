@@ -7,6 +7,7 @@ import {
 import {Client, type Room} from '@colyseus/sdk';
 import {StatusBar} from 'expo-status-bar';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import {useAudioPlayer} from 'expo-audio';
 import {BetSizing, pickRaise, type BetPreset} from './src/components/BetSizing';
 import {ShowdownBanner} from './src/components/ShowdownBanner';
 import {TurnClock} from './src/components/TurnClock';
@@ -184,8 +185,24 @@ export default function App() {
   const resumeToken = useRef<string | null>(null);
   const [hasResumeToken,setHasResumeToken]=useState(false);
   const [deadline, setDeadline] = useState<number>(0);
+  // Effects are original local WAV assets: no external download at runtime.
+  const dealSound = useAudioPlayer(require('./assets/sounds/deal.wav'));
+  const turnSound = useAudioPlayer(require('./assets/sounds/turn.wav'));
+  const actionSound = useAudioPlayer(require('./assets/sounds/action.wav'));
+  const winSound = useAudioPlayer(require('./assets/sounds/win.wav'));
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const soundEnabledRef = useRef(true);
+  const lastSoundSnapshot = useRef<Snapshot | null>(null);
+  const playEffect = (kind: 'deal' | 'turn' | 'action' | 'win') => {
+    if (!soundEnabledRef.current) return;
+    const player = kind === 'deal' ? dealSound : kind === 'turn' ? turnSound : kind === 'action' ? actionSound : winSound;
+    void player.seekTo(0).then(() => player.play()).catch(() => {});
+  };
+  const setSound = (enabled: boolean) => { soundEnabledRef.current = enabled; setSoundEnabled(enabled); };
+
 
   const attachRoom = (joined:Room) => {
+    lastSoundSnapshot.current = null;
     roomRef.current = joined;
     setRoom(joined);
     setConnected(true);
@@ -195,6 +212,17 @@ export default function App() {
     };
     saveToken();
     joined.onMessage('snapshot',(next:Snapshot)=>{
+      const previous = lastSoundSnapshot.current;
+      lastSoundSnapshot.current = next;
+      if (previous && previous.handNo === next.handNo) {
+        const prevMe = previous.players.find(p => p.id === previous.you);
+        const nextMe = next.players.find(p => p.id === next.you);
+        const prevMyTurn = !!prevMe && previous.turn === prevMe.seat && previous.street !== 'waiting' && previous.street !== 'showdown';
+        const nextMyTurn = !!nextMe && next.turn === nextMe.seat && next.street !== 'waiting' && next.street !== 'showdown';
+        if (next.street === 'showdown' && previous.street !== 'showdown') playEffect('win');
+        else if (next.board.length > previous.board.length) playEffect('deal');
+        else if (!prevMyTurn && nextMyTurn) playEffect('turn');
+      } else if (previous && next.handNo !== previous.handNo) playEffect('deal');
       setState(next);
       if(next.turnRemainingMs !== undefined){
         setDeadline(next.turnRemainingMs > 0 ? Date.now()+next.turnRemainingMs : 0);
@@ -266,7 +294,7 @@ export default function App() {
   const toCall = me && state ? Math.max(0, state.currentBet - me.streetBet) : 0;
   const maxTotal = me ? me.streetBet + me.stack : 0;
   const minTotal = state ? state.currentBet + state.minRaise : 0;
-  const send = (move: Move, amount?: number) => {if(connected)roomRef.current?.send('move', {move, amount});};
+  const send = (move: Move, amount?: number) => {if(connected){roomRef.current?.send('move', {move, amount});playEffect('action');}};
   const start = () => {if(connected)roomRef.current?.send('start');};
   useEffect(()=>{
     if(!state||!me)return;
@@ -417,7 +445,13 @@ export default function App() {
               <Text style={styles.gameLogo}>♠  GREEN HOLDEM</Text>
               
             </View>
-            <Button title="나가기" tone="outline" compact onPress={() => void exit()}/>
+            <View style={{flexDirection:'row',alignItems:'center',gap:5}}>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel={soundEnabled ? '효과음 끄기' : '효과음 켜기'}
+                style={styles.soundToggle} onPress={() => setSound(!soundEnabled)}>
+                <Text style={styles.soundToggleLabel}>{soundEnabled ? '🔊' : '🔇'}</Text>
+              </TouchableOpacity>
+              <Button title="나가기" tone="outline" compact onPress={() => void exit()}/>
+            </View>
           </View>
           <View style={styles.roomInfo}>
             <Text style={styles.roomCode} selectable>방 {room.roomId}</Text>
@@ -432,7 +466,7 @@ export default function App() {
 
           {state.turn>=0 && state.street!=='showdown'&&state.street!=='waiting' ? (
             <TurnClock key={`${state.handNo}-${state.street}-${state.turn}`} deadline={deadline} totalSeconds={state.turnSeconds??30}
-              label={myTurn?'내 차례':'현재 턴 제한시간'}/>
+              label={myTurn?'내 차례 · 0초면 자동 폴드':'현재 턴 제한시간'}/>
           ):null}
           <View style={styles.tableAndActions}>
           <View style={[styles.tableShell, {width: tableWidth, height: tableHeight}]}>
@@ -579,6 +613,8 @@ const styles = StyleSheet.create({
   railPresetText: {fontSize: 10, fontWeight: '800', color: C.ivory},
   railWaiting: {fontSize: 11, color: C.muted, textAlign: 'center', marginTop: 18},
   gameHeader: {flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 3},
+  soundToggle: {height: 38, minWidth: 37, borderRadius: 9, backgroundColor: C.elevated, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: C.line},
+  soundToggleLabel: {fontSize: 17},
   gameLogo: {fontSize: 17, fontWeight: '900', color: C.gold, letterSpacing: 1.1},
   gameSub: {fontSize: 9, letterSpacing: 1.8, color: C.muted, marginTop: 4},
   roomInfo: {paddingHorizontal: 6, paddingVertical: 3, flexDirection: 'row', alignItems: 'center', justifyContent:'space-between'},

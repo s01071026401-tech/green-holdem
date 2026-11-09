@@ -71,7 +71,8 @@ export class HoldemRoom extends Room {
       const current=this.game.players.find(x=>x.seat===this.game.turn);
       if(!current||current.id!==actor)return;
       try{
-        this.game.action(actor,this.game.currentBet>current.streetBet?'fold':'check');
+        // Timed-out human and bot seats always fold, even when checking was free.
+        this.game.action(actor,'fold');
         this.sync();
       }catch(err){console.error('Turn timer error',err);}
     },TURN_SECONDS*1000);
