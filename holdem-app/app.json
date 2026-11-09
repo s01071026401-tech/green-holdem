@@ -1,19 +1,42 @@
-{
-  "expo": {
-    "name": "Green Holdem",
-    "slug": "green-holdem",
-    "version": "1.0.0",
-    "orientation": "portrait",
-    "userInterfaceStyle": "dark",
-    "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.example.greenholdem"
-    },
-    "android": {
-      "package": "com.example.greenholdem"
-    },
-    "plugins": [
-      "expo-status-bar"
-    ]
-  }
+﻿{
+    "expo":  {
+                 "name":  "Green Holdem",
+                 "slug":  "green-holdem",
+                 "version":  "1.0.0",
+                 "orientation":  "portrait",
+                 "userInterfaceStyle":  "dark",
+                 "ios":  {
+                             "supportsTablet":  true,
+                             "bundleIdentifier":  "com.example.greenholdem",
+                             "infoPlist":  {
+                                               "ITSAppUsesNonExemptEncryption":  false
+                                           }
+                         },
+                 "android":  {
+                                 "package":  "com.example.greenholdem",
+                                 "permissions":  [
+                                                     "android.permission.RECORD_AUDIO",
+                                                     "android.permission.MODIFY_AUDIO_SETTINGS",
+                                                     "android.permission.FOREGROUND_SERVICE",
+                                                     "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+                                                 ]
+                             },
+                 "plugins":  [
+                                 "expo-status-bar",
+                                 "expo-audio"
+                             ],
+                 "extra":  {
+                               "eas":  {
+                                           "projectId":  "965c7863-faf2-4190-98b9-455acb30d485"
+                                       }
+                           },
+                 "web":  {
+                             "bundler":  "metro",
+                             "name":  "Green Holdem",
+                             "shortName":  "Green Holdem",
+                             "lang":  "ko",
+                             "favicon":  "./public/icon-192.png",
+                             "output":  "single"
+                         }
+             }
 }

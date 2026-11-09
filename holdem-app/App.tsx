@@ -173,7 +173,7 @@ function PlayerSeat({p, dealer, turn, mine, width = 93, blind, handNo = 0}: {
 
 export default function App() {
   const {width: screenWidth, height: screenHeight} = useWindowDimensions();
-  const [name, setName] = useState('');
+  const [name, setName] = useState('Player 1');
   const [code, setCode] = useState('');
   const [room, setRoom] = useState<Room | null>(null);
   const roomRef = useRef<Room | null>(null);
@@ -183,6 +183,22 @@ export default function App() {
   const [aiDifficulty, setAiDifficulty] = useState<'easy'|'medium'|'hard'>('medium');
   const [connected, setConnected] = useState(true);
   const [reconnectBusy, setReconnectBusy] = useState(false);
+  const reconnectBusyRef = useRef(false);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectDeadlineRef = useRef(0);
+  const reconnectActionRef = useRef<() => Promise<void>>(async () => {});
+  const [connectionNotice, setConnectionNotice] = useState('');
+  const cancelReconnectTimer = () => {
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    reconnectTimerRef.current = null;
+  };
+  const scheduleReconnect = (delayMs: number) => {
+    cancelReconnectTimer();
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectTimerRef.current = null;
+      void reconnectActionRef.current();
+    }, delayMs);
+  };
   const resumeToken = useRef<string | null>(null);
   const [hasResumeToken,setHasResumeToken]=useState(false);
   const [deadline, setDeadline] = useState<number>(0);
@@ -208,23 +224,29 @@ export default function App() {
   const homeClick = (action: () => void) => { playEffect('keyboard'); action(); };
 
 
-  const attachRoom = (joined:Room) => {
+  const attachRoom = (joined: Room) => {
+    cancelReconnectTimer();
+    reconnectDeadlineRef.current = 0;
     lastSoundSnapshot.current = null;
     roomRef.current = joined;
     setRoom(joined);
     setConnected(true);
-    const saveToken=()=>{
-      const token=joined.reconnectionToken;
-      if(token){resumeToken.current=token;setHasResumeToken(true);void AsyncStorage.setItem(SESSION_KEY,token).catch(()=>{});}
+    setConnectionNotice('');
+    const saveToken = () => {
+      const token = joined.reconnectionToken;
+      if (token) {
+        resumeToken.current = token;
+        setHasResumeToken(true);
+        void AsyncStorage.setItem(SESSION_KEY, token).catch(() => {});
+      }
     };
     saveToken();
-    joined.onMessage('snapshot',(next:Snapshot)=>{
+    joined.onMessage('snapshot', (next: Snapshot) => {
+      if (roomRef.current !== joined) return;
       const previous = lastSoundSnapshot.current;
       lastSoundSnapshot.current = next;
       if (previous && previous.handNo === next.handNo) {
-        // Play once per snapshot containing confirmed chip movement, not on a speculative tap.
         const paidIn = next.players.some(p => p.totalBet > (previous.players.find(old => old.id === p.id)?.totalBet ?? p.totalBet));
-        // A payout is a stack increase when the hand settles, rather than buy-in/rejoin.
         const paidOut = next.players.some(p => {
           const old = previous.players.find(q => q.id === p.id);
           return !!old && p.stack > old.stack && (next.street === 'showdown' || previous.street === 'showdown');
@@ -240,37 +262,71 @@ export default function App() {
         else if (!prevMyTurn && nextMyTurn) playEffect('turn');
       } else if (previous && next.handNo !== previous.handNo) playEffect('deal');
       setState(next);
-      if(next.turnRemainingMs !== undefined){
-        setDeadline(next.turnRemainingMs > 0 ? Date.now()+next.turnRemainingMs : 0);
+      if (next.turnRemainingMs !== undefined) {
+        setDeadline(next.turnRemainingMs > 0 ? Date.now() + next.turnRemainingMs : 0);
       }
     });
-    joined.onMessage('gameError',(msg:string)=>Alert.alert('게임 알림',msg));
-    joined.onError((_code:number,msg?:string)=>Alert.alert('네트워크 오류',msg ?? '연결 오류'));
-    joined.onDrop(()=>setConnected(false));
-    joined.onReconnect(()=>{setConnected(true);saveToken();joined.send('refresh');});
-    joined.onLeave(()=>{
-      if(roomRef.current===joined){
-        roomRef.current=null;setRoom(null);setState(null);setConnected(false);
-        Alert.alert('연결 종료','방 연결이 종료됐습니다. 45초 안이라면 재접속을 시도할 수 있습니다.');
-      }
+    joined.onMessage('gameError', (msg: string) => {
+      if (roomRef.current === joined) Alert.alert('게임 알림', msg);
+    });
+    // A transient transport error should not force an Expo QR-code restart.
+    joined.onError((_code: number, msg?: string) => {
+      if (roomRef.current !== joined) return;
+      // onError does not always mean the socket closed; onDrop/onLeave handle
+      // actual disconnections. Avoid freezing buttons on a recoverable warning.
+      if (__DEV__) console.warn('[GreenHoldem] room transport error:', msg);
+    });
+    joined.onDrop(() => {
+      if (roomRef.current !== joined) return;
+      setConnected(false);
+      setConnectionNotice('네트워크 재연결 중... (게임 화면 유지)');
+      // Colyseus first attempts its built-in onDrop/onReconnect recovery.
+    });
+    joined.onReconnect(() => {
+      if (roomRef.current !== joined) return;
+      setConnected(true);
+      setConnectionNotice('');
+      saveToken();
+      joined.send('refresh');
+    });
+    joined.onLeave(() => {
+      if (roomRef.current !== joined) return;
+      // Keep the saved seat token. Try reconnection without re-scanning Expo QR.
+      roomRef.current = null;
+      // Keep the existing table snapshot visible while reconnecting. The old
+      // Room reference remains in UI state until attachRoom replaces it.
+      setConnected(false);
+      setConnectionNotice('연결이 끊겼습니다. 기존 방에 자동 재접속 중...');
+      reconnectDeadlineRef.current = Date.now() + 35000;
+      scheduleReconnect(1000);
     });
     joined.send('refresh');
   };
-  const reconnect=async()=>{
-    if(reconnectBusy)return;
+  const reconnect = async () => {
+    if (reconnectBusyRef.current || roomRef.current) return;
+    reconnectBusyRef.current = true;
     setReconnectBusy(true);
-    try{
-      const token=resumeToken.current ?? await AsyncStorage.getItem(SESSION_KEY);
-      if(!token)throw new Error('저장된 재접속 정보가 없습니다');
-      // The original seat is held by the server for up to 45 seconds.
-      const joined=await new Client(SERVER).reconnect(token);
+    setConnectionNotice('기존 게임방에 재접속 중...');
+    try {
+      const token = resumeToken.current ?? await AsyncStorage.getItem(SESSION_KEY);
+      if (!token) throw new Error('저장된 재접속 정보가 없습니다');
+      const joined = await new Client(SERVER).reconnect(token);
       attachRoom(joined);
-    }catch(err){
-      resumeToken.current=null;setHasResumeToken(false);
-      await AsyncStorage.removeItem(SESSION_KEY).catch(()=>{});
-      Alert.alert('재접속 실패','재접속 제한시간 만료 또는 서버 재시작 가능성이 있습니다. 새 방으로 입장하세요.');
-    }finally{setReconnectBusy(false);}
+    } catch (err) {
+      if (__DEV__) console.warn('[GreenHoldem] reconnect failed:', err);
+      if (reconnectDeadlineRef.current > Date.now()) {
+        setConnectionNotice('재접속 재시도 중...');
+        scheduleReconnect(2500);
+      } else {
+        setConnectionNotice('자동 재접속 실패. 아래 버튼으로 재시도하거나 방에 다시 입장하세요.');
+        // The token stays until the user explicitly exits or joins a new room.
+      }
+    } finally {
+      reconnectBusyRef.current = false;
+      setReconnectBusy(false);
+    }
   };
+  reconnectActionRef.current = reconnect;
   useEffect(()=>{
     let alive=true;
     void AsyncStorage.getItem(NICKNAME_KEY).then(saved=>{if(alive&&saved)setName(saved);}).catch(()=>{});
@@ -287,6 +343,8 @@ export default function App() {
   const connect = async (kind: 'create' | 'join' | 'solo') => {
     if (!name.trim()) return Alert.alert('알림', '닉네임을 입력하세요');
     if (kind === 'join' && !code.trim()) return Alert.alert('알림', '초대 코드를 입력하세요');
+    cancelReconnectTimer();
+    reconnectDeadlineRef.current = 0;
     setBusy(true);
     void AsyncStorage.setItem(NICKNAME_KEY,name.trim()).catch(()=>{});
     try {
@@ -303,14 +361,20 @@ export default function App() {
     }
   };
   const exit = async () => {
+    cancelReconnectTimer();
+    reconnectDeadlineRef.current = 0;
     const r = roomRef.current;
     resumeToken.current=null;setHasResumeToken(false);void AsyncStorage.removeItem(SESSION_KEY).catch(()=>{});
     roomRef.current = null;
     setRoom(null);
     setState(null);
+    setConnectionNotice('');
     if (r) await r.leave();
   };
-  useEffect(() => () => {void roomRef.current?.leave();}, []);
+  useEffect(() => () => {
+    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    void roomRef.current?.leave();
+  }, []);
   const me = state?.players.find(p => p.id === state.you);
   const myTurn = !!(state && me && state.turn === me.seat);
   const toCall = me && state ? Math.max(0, state.currentBet - me.streetBet) : 0;
@@ -394,7 +458,8 @@ export default function App() {
             <Text style={styles.difficultyHelp}>
               {aiDifficulty === 'easy' ? '쉬움: 내 현재 족보 + 추정 승률 표시' : aiDifficulty === 'medium' ? '보통: 기존 화면 그대로 (추정 승률 표시)' : '어려움: 족보 안내와 추정 승률 숨김'}
             </Text>
-            {hasResumeToken?<Button title={reconnectBusy?'재접속 시도 중...':'이전 방 재접속 (45초 이내)'} tone="outline" disabled={reconnectBusy} onPress={()=>homeClick(()=>void reconnect())}/>:null}
+            {connectionNotice ? <Text style={styles.v05Warning}>{connectionNotice}</Text> : null}
+            {hasResumeToken?<Button title={reconnectBusy?'기존 방 재접속 중...':'이전 방으로 재접속'} tone="outline" disabled={reconnectBusy} onPress={()=>homeClick(()=>void reconnect())}/>:null}
             <View style={styles.homeButtons}>
               <Button title="♠  온라인 비공개 방 만들기" disabled={busy} onPress={() => homeClick(() => void connect('create'))}/>
               <Button title="♣  혼자 연습하기 · AI 2명" disabled={busy} tone="green" onPress={() => homeClick(() => void connect('solo'))}/>
@@ -481,7 +546,13 @@ export default function App() {
             <Text style={styles.roomCode} selectable>방 {room.roomId}</Text>
             <Text style={styles.roomCountText}>● {state.players.length}/7</Text>
           </View>
-          {!connected?<Text style={styles.v05Warning}>네트워크 재접속 중 — 조작이 잠시 제한됩니다</Text>:null}
+          {!connected ? (
+            <View>
+              <Text style={styles.v05Warning}>{connectionNotice || '연결 복구 중 — 조작이 잠시 제한됩니다'}</Text>
+              {!roomRef.current ? <Button title={reconnectBusy ? '재접속 중...' : '기존 방 재접속 시도'}
+                tone="outline" compact disabled={reconnectBusy} onPress={() => void reconnect()}/> : null}
+            </View>
+          ) : null}
           <View style={styles.gameMetaRow}>
             <Text style={styles.metaLabel}>HAND #{state.handNo}</Text>
             <Text style={styles.roundPill}>{state.street.toUpperCase()}</Text>

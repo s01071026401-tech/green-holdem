@@ -11,12 +11,15 @@
   },
   "dependencies": {
     "@colyseus/sdk": "^0.17.0",
+    "@expo/metro-runtime": "~58.0.17",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~58.0.23",
     "expo-audio": "~58.0.11",
     "expo-status-bar": "~58.0.4",
     "react": "19.3.0",
-    "react-native": "0.88.1"
+    "react-dom": "19.3.0",
+    "react-native": "0.88.1",
+    "react-native-web": "^0.21.4"
   },
   "devDependencies": {
     "@expo/ngrok": "^4.1.0",
