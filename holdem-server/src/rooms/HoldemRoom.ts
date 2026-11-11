@@ -10,6 +10,8 @@ export class HoldemRoom extends Room {
   maxClients=MAX_PLAYERS;
   game=new Holdem();
   private botSerial=0;
+  // Lightweight long-term opponent reads. No private hole cards are inspected.
+  private humanFoldStats=new Map<string,{opportunities:number;folds:number}>();
   private pendingBotAdds:{count:number;difficulty:Difficulty}[]=[];
   private pendingBotRemovals=0;
   private pendingRebuys=new Set<string>();
@@ -76,7 +78,14 @@ export class HoldemRoom extends Room {
       if(!msg||!['fold','check','call','raise','allin'].includes(msg.move))throw new Error('잘못된 행동');
       const boardBefore=this.game.board.length;
       const stackBefore=new Map(this.game.players.map(p=>[p.id,p.stack]));
+      const beforeActor=this.game.players.find(p=>p.id===client.sessionId);
+      const facingBet=!!beforeActor&&this.game.currentBet>beforeActor.streetBet;
       this.game.action(client.sessionId,msg.move,msg.amount);
+      if(facingBet&&beforeActor&&!this.botLevels.has(client.sessionId)){
+        const stats=this.humanFoldStats.get(client.sessionId)??{opportunities:0,folds:0};
+        stats.opportunities++;if(msg.move==='fold')stats.folds++;
+        this.humanFoldStats.set(client.sessionId,stats);
+      }
       this.startAllInRevealIfNeeded(boardBefore,stackBefore);
       this.sync();
     }));
@@ -230,14 +239,23 @@ export class HoldemRoom extends Room {
       try{
         const before=this.game.board.length;
         const stacks=new Map(this.game.players.map(p=>[p.id,p.stack]));
-        const decision=decideBot(actor,this.game.board,this.game.currentBet,this.game.minRaise,this.botLevels.get(botId)??'medium',Math.random,{pot:this.game.view(botId).totalPot,opponents:this.game.players.filter(p=>p.id!==botId&&p.hole.length===2&&!p.folded).length});
+        const humanStats=[...this.humanFoldStats.values()].reduce((total,stats)=>({opportunities:total.opportunities+stats.opportunities,folds:total.folds+stats.folds}),{opportunities:0,folds:0});
+        const seatDistance=(actor.seat-this.game.dealer+MAX_PLAYERS)%MAX_PLAYERS;
+        const position:0|1|2=seatDistance===0||seatDistance>=MAX_PLAYERS-2?2:seatDistance<=2?0:1;
+        const personality=Number(botId.split('-').pop()??'1')%3 as 0|1|2;
+        const decision=decideBot(actor,this.game.board,this.game.currentBet,this.game.minRaise,this.botLevels.get(botId)??'medium',Math.random,{
+          pot:this.game.view(botId).totalPot,
+          opponents:this.game.players.filter(p=>p.id!==botId&&p.hole.length===2&&!p.folded).length,
+          position,personality,
+          opponentFoldRate:humanStats.opportunities>=8?humanStats.folds/humanStats.opportunities:0.42,
+        });
         try{this.game.action(botId,decision.move,decision.amount);}catch{
           this.game.action(botId,this.game.currentBet>actor.streetBet?'call':'check');
         }
         this.startAllInRevealIfNeeded(before,stacks);
         this.sync();
       }catch(err){console.error('Bot action error',err);}
-    },450+Math.floor(Math.random()*1800));
+    },650+Math.floor(Math.random()*2400));
   }
   private safe(client:Client,fn:()=>void){try{fn();}catch(err){client.send('gameError',err instanceof Error?err.message:'처리 오류');}}
 }
