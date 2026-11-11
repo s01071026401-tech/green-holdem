@@ -70,3 +70,24 @@ for (const difficulty of ['easy','medium','hard'] as const) {
     assert.equal(d.move,'check');
   });
 }
+
+
+// v0.7.4: participation and aggression improvements are shared by all levels.
+for(const difficulty of ['easy','medium','hard'] as const){
+  test(`${difficulty}: affordable preflop bet can be called with marginal hole cards`,()=>{
+    const p=player(['2s','7d'],9900);
+    const result=decideBot(p,[],100,100,difficulty,()=>0.45,{pot:250,opponents:6,position:0,personality:1});
+    assert.equal(result.move,'call');
+  });
+  test(`${difficulty}: very expensive weak-hand pressure still folds`,()=>{
+    const p=player(['2s','7d'],1800);
+    const result=decideBot(p,[],1300,100,difficulty,()=>0.45,{pot:1500,opponents:6,position:0,personality:1});
+    assert.equal(result.move,'fold');
+  });
+  test(`${difficulty}: medium-strength late-position hand may open raise`,()=>{
+    const p=player(['Ks','Qs'],9900);
+    const result=decideBot(p,[],100,100,difficulty,()=>0.20,{pot:350,opponents:6,position:2,personality:1});
+    assert.equal(result.move,'raise');
+    assert.ok(typeof result.amount==='number'&&result.amount>=200&&result.amount<=9900);
+  });
+}

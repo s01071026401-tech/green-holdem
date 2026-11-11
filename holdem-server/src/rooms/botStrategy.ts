@@ -107,35 +107,40 @@ export function decideBot(p:Player,board:Card[],currentBet:number,minRaise:numbe
   const foldAdjust=(opponentFoldRate-0.42)*0.25;
   const bluffBase=clamp(0.13+aggression*0.45+positionalBonus+foldAdjust-(opponents-1)*0.055);
   const noise=(rng(random)-0.5)*0.12;
-  const confidence=clamp(strength+detail.draw*0.60+positionalBonus*0.30+noise-(opponents-1)*0.035);
+  const confidence=clamp(strength+detail.draw*0.60+positionalBonus*0.30+noise-(opponents-1)*0.018);
 
   // Tighten calling odds when facing substantial pressure; draws can justify calls.
-  const callNeed=clamp(0.16+price*0.82+Math.min(0.17,toCall/Math.max(1,p.stack)*0.24)+(opponents-1)*0.03);
-  const canContinue=confidence+detail.draw*0.30>=callNeed || (pre&&confidence>0.56&&price<0.18);
+  const callNeed=clamp(0.12+price*0.66+Math.min(0.18,toCall/Math.max(1,p.stack)*0.22)+(opponents-1)*0.014);
+  // When the blind is small compared with the stack, many recreational players
+  // see a flop with marginal hands instead of folding the majority of a table.
+  // Keep a randomized (not automatic) willingness to defend cheap preflops.
+  const cheapPreflop=pre&&toCall>0&&toCall<=p.stack*0.055&&toCall<=Math.max(180,pot*0.72);
+  const affordableCall=cheapPreflop&&confidence<0.53&&rng(random)<(personality===0?0.62:personality===2?0.86:0.77);
+  const canContinue=confidence+detail.draw*0.30>=callNeed || affordableCall || (pre&&confidence>0.49&&price<0.21);
   // Concede hopeless holdings when facing a meaningful price, regardless
   // of the selected UI difficulty. Do not fold for free when check is legal.
-  const weakNoDraw=detail.draw<0.10&&confidence<(pre?0.40:0.38);
-  if(toCall>0 && ((weakNoDraw && (price>=0.15||toCall>=p.stack*0.18)) || !canContinue)){
+  const weakNoDraw=detail.draw<0.10&&confidence<(pre?0.35:0.37);
+  if(toCall>0 && ((weakNoDraw && !affordableCall && (price>=0.29||toCall>=p.stack*0.20)) || !canContinue)){
     return {move:'fold'};
   }
 
   // Stronger value range bets frequently. Semi-bluffs prefer real draws,
   // while river bluffs need low showdown value and good fold equity.
-  const valueThreshold=pre?0.65:0.64;
+  const valueThreshold=pre?0.54:0.58;
   const premium=confidence>(pre?0.86:0.86);
-  const valueRaise=confidence>=valueThreshold && rng(random)<Math.min(0.92,clamp(0.60+aggression+Math.max(0,confidence-valueThreshold)*0.60));
+  const valueRaise=confidence>=valueThreshold && rng(random)<Math.min(0.95,clamp(0.74+aggression+Math.max(0,confidence-valueThreshold)*0.45));
   const semiBluff=board.length>=3&&board.length<5&&detail.draw>=0.14&&strength<0.78;
-  const preBluff=pre&&confidence>=0.43&&confidence<0.66&&position>=1;
+  const preBluff=pre&&confidence>=0.38&&confidence<0.64&&position>=1;
   const riverBluff=board.length===5&&detail.showdown===0&&position===2&&stackPot>0.7;
   const pureBluff=semiBluff||preBluff||riverBluff;
-  const bluffChance=bluffBase*(semiBluff?2.5:preBluff?1.15:riverBluff?0.95:0.0)*(toCall>0?0.70:1);
+  const bluffChance=bluffBase*(semiBluff?2.8:preBluff?1.45:riverBluff?1.0:0.0)*(toCall>0?0.78:1);
   const bluffRaise=pureBluff&&rng(random)<clamp(bluffChance);
   const betAllowed=canRaise && (valueRaise||bluffRaise);
 
   if(betAllowed){
     // Realistic mixed bet sizes: quarter/half/three-quarter/pot/occasional overbet.
     const roll=rng(random);
-    const fractions=confidence>0.91?[0.40,0.66,0.9,1.2]:bluffRaise?[0.30,0.50,0.75,0.95]:[0.30,0.48,0.67,0.85];
+    const fractions=confidence>0.91?[0.45,0.72,1.0,1.25]:bluffRaise?[0.36,0.60,0.80,1.0]:[0.40,0.65,0.85,1.0];
     const frac=fractions[Math.min(fractions.length-1,Math.floor(roll*fractions.length))];
     const target=betAmount(currentBet,minTotal,maxTotal,pot,frac);
     // Short-stack premiums push naturally; pure bluffs rarely shove into multiple opponents.
