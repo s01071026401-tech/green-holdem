@@ -175,6 +175,8 @@ export default function App() {
   const {width: screenWidth, height: screenHeight} = useWindowDimensions();
   const [name, setName] = useState('Player 1');
   const [code, setCode] = useState('');
+  const [createCode, setCreateCode] = useState('');
+  const [serverStatus, setServerStatus] = useState<'connecting'|'ready'|'slow'>('connecting');
   const [room, setRoom] = useState<Room | null>(null);
   const roomRef = useRef<Room | null>(null);
   const [state, setState] = useState<Snapshot | null>(null);
@@ -202,6 +204,16 @@ export default function App() {
   const resumeToken = useRef<string | null>(null);
   const [hasResumeToken,setHasResumeToken]=useState(false);
   const [deadline, setDeadline] = useState<number>(0);
+  useEffect(()=>{
+    let alive=true;
+    const timer=setTimeout(()=>{if(alive)setServerStatus('slow');},4500);
+    // Wake free-tier Render as soon as the home screen opens.
+    // This reduces cold-start wait when entering a game, but cannot prevent
+    // the host from sleeping between visits.
+    fetch(SERVER,{method:'GET'}).then(()=>{if(alive)setServerStatus('ready');})
+      .catch(()=>{if(alive)setServerStatus('slow');}).finally(()=>clearTimeout(timer));
+    return ()=>{alive=false;clearTimeout(timer);};
+  },[]);
   // Effects are original local WAV assets: no external download at runtime.
   const dealSound = useAudioPlayer(require('./assets/sounds/deal.wav'));
   const turnSound = useAudioPlayer(require('./assets/sounds/turn.wav'));
@@ -341,6 +353,7 @@ export default function App() {
   },[]);
   // 기존 서버 프로토콜과 방/AI 접속 로직은 그대로 보존합니다.
   const connect = async (kind: 'create' | 'join' | 'solo') => {
+    if(kind==='create' && createCode.trim() && !/^[A-Za-z0-9]{4,12}$/.test(createCode.trim()))return Alert.alert('방 코드','영문/숫자 4~12자리로 입력해 주세요');
     if (!name.trim()) return Alert.alert('알림', '닉네임을 입력하세요');
     if (kind === 'join' && !code.trim()) return Alert.alert('알림', '초대 코드를 입력하세요');
     cancelReconnectTimer();
@@ -349,9 +362,19 @@ export default function App() {
     void AsyncStorage.setItem(NICKNAME_KEY,name.trim()).catch(()=>{});
     try {
       const client = new Client(SERVER);
-      const joined = kind !== 'join'
-        ? await client.create('holdem', {name: name.trim()})
-        : await client.joinById(code.trim(), {name: name.trim()});
+      let joined: Room;
+      if (kind !== 'join') {
+        joined = await client.create('holdem', {name: name.trim(),
+          ...(kind==='create'&&createCode.trim() ? {roomCode:createCode.trim().toUpperCase()} : {})});
+      } else {
+        // Auto-generated Colyseus room IDs are case-sensitive: try exact first.
+        const typed=code.trim();
+        try { joined=await client.joinById(typed,{name:name.trim()}); }
+        catch (err) {
+          if (typed===typed.toUpperCase()) throw err;
+          joined=await client.joinById(typed.toUpperCase(),{name:name.trim()});
+        }
+      }
       attachRoom(joined);
       if (kind === 'solo') joined.send('addBot', {count: 2, difficulty: aiDifficulty});
     } catch (e) {
@@ -418,7 +441,7 @@ export default function App() {
     const opponents = state.players.filter(p => p.cardsCount > 0 && !p.folded && p.id !== state.you).length;
     if (opponents < 1) return;
     // Schedule after paint to avoid blocking touch feedback.
-    const timer = setTimeout(() => setEquity(estimateEquity(me.hole, state.board, opponents, 500)), 65);
+    const timer = setTimeout(() => setEquity(estimateEquity(me.hole, state.board, opponents, 250)), 65);
     return () => clearTimeout(timer);
   // equityKey captures all equity-relevant values, preventing resimulation on every action.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -458,8 +481,15 @@ export default function App() {
             <Text style={styles.difficultyHelp}>
               {aiDifficulty === 'easy' ? '쉬움: 내 현재 족보 + 추정 승률 표시' : aiDifficulty === 'medium' ? '보통: 기존 화면 그대로 (추정 승률 표시)' : '어려움: 족보 안내와 추정 승률 숨김'}
             </Text>
+            {serverStatus!=='ready' ? <Text style={styles.difficultyHelp}>
+              {serverStatus==='connecting'?'게임 서버 연결 확인 중...':'서버가 잠들어 있으면 첫 입장이 오래 걸릴 수 있어요. 연결을 시도하고 있습니다.'}
+            </Text> : null}
             {connectionNotice ? <Text style={styles.v05Warning}>{connectionNotice}</Text> : null}
             {hasResumeToken?<Button title={reconnectBusy?'기존 방 재접속 중...':'이전 방으로 재접속'} tone="outline" disabled={reconnectBusy} onPress={()=>homeClick(()=>void reconnect())}/>:null}
+            <Text style={styles.fieldLabel}>내가 정할 방 코드 (선택, 영문·숫자 4~12자리)</Text>
+            <TextInput style={styles.textInput} value={createCode} onChangeText={setCreateCode}
+              autoCapitalize="characters" autoCorrect={false} maxLength={12}
+              placeholder="예: GREEN777 (비우면 자동 생성)" placeholderTextColor="#759682"/>
             <View style={styles.homeButtons}>
               <Button title="♠  온라인 비공개 방 만들기" disabled={busy} onPress={() => homeClick(() => void connect('create'))}/>
               <Button title="♣  혼자 연습하기 · AI 2명" disabled={busy} tone="green" onPress={() => homeClick(() => void connect('solo'))}/>
@@ -520,7 +550,11 @@ export default function App() {
   };
   const handIsOver = state.street === 'waiting' || state.street === 'showdown';
   const waitingThisHand = !!(state && me && state.street !== 'waiting' && state.street !== 'showdown' && me.waitingForNextHand);
-  const busted = !!(state && me && me.stack===0 && (state.street==='waiting'||state.street==='showdown'));
+  const busted = !!(state && me && me.stack===0 && (state.street==='waiting'||state.street==='showdown'||(me.folded||me.cardsCount===0)));
+  const canRebuyNow=!!(me&&me.stack===0&&!state.rebuyQueued&&
+    (state.street==='waiting'||state.street==='showdown'||me.folded||me.cardsCount===0));
+  const botCount=state.players.filter(p=>p.id.startsWith('bot-')).length;
+  const isRevealing=!!state.revealInProgress;
   const canStart = state.players.filter(p => p.connected && p.stack > 0).length >= 2;
   const canRaise = connected && Number.isSafeInteger(Number(raise)) && Number(raise) >= minTotal && Number(raise) > 0 && Number(raise) <= maxTotal;
 
@@ -563,6 +597,9 @@ export default function App() {
             <TurnClock key={`${state.handNo}-${state.street}-${state.turn}`} deadline={deadline} totalSeconds={state.turnSeconds??30}
               label={myTurn?'내 차례 · 0초면 자동 폴드':'현재 턴 제한시간'}/>
           ):null}
+          {isRevealing ? <View style={styles.v058Info}>
+            <Text style={styles.v058InfoText}>전원 올인 · 커뮤니티 카드 한 장씩 공개 (2초 간격)</Text>
+          </View> : null}
           {waitingThisHand ? <View style={styles.v058Info}><Text style={styles.v058InfoText}>관전 중 · 현재 판 종료 후 다음 핸드에 참가합니다. 팟과 커뮤니티 카드를 볼 수 있어요.</Text></View> : null}
           <View style={styles.tableAndActions}>
           <View style={[styles.tableShell, {width: tableWidth, height: tableHeight}]}>
@@ -597,14 +634,30 @@ export default function App() {
           </View>
           <View style={[styles.rightActionRail, {width: actionRailWidth}]}>
             <Text style={styles.railHeading}>YOUR ACTION</Text>
-            {handIsOver ? (
+            {canRebuyNow ? <Button title="10,000칩 재참가" tone="green" compact
+              onPress={()=>roomRef.current?.send('rebuy')}/> : null}
+            {state.rebuyQueued ? <Text style={styles.railWaiting}>재참가 신청 완료 · 다음 판부터 적용</Text> : null}
+            <Text style={styles.railSmallLabel}>AI {botCount}명</Text>
+            <View style={styles.railPresetRow}>
+              <TouchableOpacity style={[styles.railPreset,{opacity:botCount>=7?0.4:1}]}
+                disabled={botCount>=7||!connected} onPress={()=>roomRef.current?.send('addBot',{count:1,difficulty:aiDifficulty})}>
+                <Text style={styles.railPresetText}>AI +</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.railPreset,{opacity:botCount<=0?0.4:1}]}
+                disabled={botCount<=0||!connected} onPress={()=>roomRef.current?.send('removeBot')}>
+                <Text style={styles.railPresetText}>AI −</Text>
+              </TouchableOpacity>
+            </View>
+            {state.pendingBotAdds||state.pendingBotRemovals ?
+              <Text style={styles.railWaiting}>AI 변경은 다음 판부터 적용</Text> : null}
+            {isRevealing ? <Text style={styles.railWaiting}>커뮤니티 카드 공개 중...</Text> : handIsOver ? (
               <View style={styles.railControls}>
-                {busted ? <Button title="10,000칩 재참가" tone="green" compact onPress={() => roomRef.current?.send('rebuy')}/> : null}
+                {state.street==='showdown' && state.result?.winners?.length ? (
+                  <Text style={styles.railWaiting}>{state.result.winners.map(w=>`${w.name}: ${w.handName}`).join('\n')}</Text>
+                ) : null}
                 {state.street === 'showdown' ? (
-                  <Text style={styles.railWaiting}>{canStart ? '10초 후 자동 다음 판' : '다음 판 대기 · 참가자 부족'}</Text>
+                  <Text style={styles.railWaiting}>{canStart ? '5초 후 자동 다음 판' : '다음 판 대기 · 참가자 부족'}</Text>
                 ) : <Button title="게임 시작" disabled={!canStart} compact onPress={start}/>}
-                <Button title="AI 추가" tone="outline" compact disabled={state.players.length >= 7}
-                  onPress={() => roomRef.current?.send('addBot', {count: 1,difficulty:aiDifficulty})}/>
               </View>
             ) : waitingThisHand ? (
               <Text style={styles.railWaiting}>현재 판 관전 중{`\n`}다음 판부터 참여</Text>
@@ -648,7 +701,7 @@ export default function App() {
           ) : null}
 
           {state.street==='showdown'&&state.result?<ShowdownBanner
-            winners={aiDifficulty === 'hard' ? state.result.winners.map(w => ({...w, handName: ''})) : state.result.winners}
+            winners={state.result.winners}
             you={state.you}/>:null}
           {state.street==='showdown' && (state.showdownHands?.length ?? 0)>0 ? (
             <View style={styles.v058ShowdownPanel}>
@@ -664,7 +717,7 @@ export default function App() {
           ):null}
           {handIsOver ? <View style={styles.logPanel}>
             <Text style={styles.controlTitle}>GAME HISTORY</Text>
-            {state.log.slice(-6).map((line, i) => <Text style={styles.logText} key={i}>•  {aiDifficulty === 'hard' ? handNames.reduce((s, name) => s.split(name).join('비공개'), line) : line}</Text>)}
+            {state.log.slice(-6).map((line, i) => <Text style={styles.logText} key={i}>•  {line}</Text>)}
           </View> : null}
         </ScrollView>
       </KeyboardAvoidingView>

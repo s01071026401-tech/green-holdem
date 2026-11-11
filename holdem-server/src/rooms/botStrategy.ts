@@ -25,6 +25,11 @@ function handStrength(hole:Card[], board:Card[]):number {
 export function decideBot(p:Player,board:Card[],currentBet:number,minRaise:number,difficulty:Difficulty,random=Math.random):BotDecision {
   const toCall=Math.max(0,currentBet-p.streetBet);
   const strength=handStrength(p.hole,board);
+  // Small natural strategy changes each decision, while favoring stronger hands.
+  // Keep a deterministic injected RNG for repeatable tests.
+  const tempo=random();
+  const variability=(tempo-0.5)*0.16;
+  const effectiveStrength=Math.min(1,Math.max(0,strength+variability));
   const pressure=toCall/Math.max(1,p.stack+toCall);
   if(difficulty==='easy'){
     if(toCall===0)return {move:'check'};
@@ -32,14 +37,18 @@ export function decideBot(p:Player,board:Card[],currentBet:number,minRaise:numbe
   }
   const hard=difficulty==='hard';
   const foldThreshold=(hard?0.29:0.2)+pressure*(hard?0.95:0.65);
-  if(toCall>0&&strength+random()*0.22<foldThreshold)return {move:'fold'};
+  if(toCall>0&&effectiveStrength+random()*0.22<foldThreshold)return {move:'fold'};
   const aggression=hard?0.56:0.76;
   const bluff=hard?0.065:0.025;
-  const wantsRaise=(strength>aggression||random()<bluff);
+  const wantsRaise=(effectiveStrength>aggression||random()<bluff);
+  // Vary bet sizing for premium hands and opportunistic semi-bluffs; never
+  // exceed the stack. The baseline raise stays the same for ordinary cases.
   const target=currentBet+minRaise;
   const maxTotal=p.streetBet+p.stack;
   if(wantsRaise&&p.raiseRights&&maxTotal>=target&&target>currentBet&&p.stack>toCall){
-    return {move:'raise',amount:target};
+    const larger=hard&&effectiveStrength>0.88&&tempo>0.8;
+    const chosen=larger?Math.min(maxTotal,target+minRaise):target;
+    return {move:'raise',amount:chosen};
   }
   return {move:toCall===0?'check':'call'};
 }
