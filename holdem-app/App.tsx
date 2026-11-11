@@ -150,17 +150,18 @@ function MovingChip({fromX, fromY, toX, toY, onDone}: {
 function SectionLabel({children}: {children: React.ReactNode}) {
   return <Text style={styles.sectionLabel}>{children}</Text>;
 }
-function PlayerSeat({p, dealer, turn, mine, width = 93, blind, handNo = 0}: {
-  p: PlayerView; dealer: boolean; turn: boolean; mine: boolean; width?: number; blind?: 'SB' | 'BB'; handNo?: number;
+function PlayerSeat({p, dealer, turn, mine, winner = false, width = 93, blind, handNo = 0}: {
+  p: PlayerView; dealer: boolean; turn: boolean; mine: boolean; winner?: boolean; width?: number; blind?: 'SB' | 'BB'; handNo?: number;
 }) {
   return (
-    <View style={[styles.seat, {width}, turn && styles.seatTurn, mine && styles.seatMine, p.folded && styles.seatFolded]}>
+    <View style={[styles.seat, {width}, turn && styles.seatTurn, mine && styles.seatMine, p.folded && styles.seatFolded, winner && styles.seatWinner]}>
       <View style={styles.seatHeader}>
         <View style={[styles.seatDot, {backgroundColor: mine ? C.gold : p.connected ? '#55C58C' : '#9B8D8D'}]}/>
         <Text style={styles.seatName} numberOfLines={1}>{p.name}</Text>
         {dealer ? <Text style={styles.dealerBadge}>D</Text> : null}
         {blind ? <Text style={styles.blindBadge}>{blind}</Text> : null}
       </View>
+      {winner ? <Text style={styles.seatWinnerBadge}>🏆 WIN</Text> : null}
       <Text style={styles.seatStack}>◉ {formatChips(p.stack)}</Text>
       <Text style={styles.seatMeta} numberOfLines={1}>{p.allIn ? 'ALL-IN' : p.folded ? 'FOLD' : !p.connected ? 'OFFLINE' : `베팅 ${formatChips(p.streetBet)}`}</Text>
       <View style={styles.seatCards}>
@@ -222,14 +223,18 @@ export default function App() {
   const chipBetSound = useAudioPlayer(require('./assets/sounds/chip_bet.wav'));
   const chipWinSound = useAudioPlayer(require('./assets/sounds/chip_win.wav'));
   const keyboardSound = useAudioPlayer(require('./assets/sounds/keyboard_click.wav'));
+  const checkVoice = useAudioPlayer(require('./assets/sounds/voice_check.wav'));
+  const callVoice = useAudioPlayer(require('./assets/sounds/voice_call.wav'));
+  const allinVoice = useAudioPlayer(require('./assets/sounds/voice_allin.wav'));
   const [soundEnabled, setSoundEnabled] = useState(true);
   const soundEnabledRef = useRef(true);
   const lastSoundSnapshot = useRef<Snapshot | null>(null);
-  const playEffect = (kind: 'deal' | 'turn' | 'action' | 'win' | 'chipBet' | 'chipWin' | 'keyboard') => {
+  const playEffect = (kind: 'deal' | 'turn' | 'action' | 'win' | 'chipBet' | 'chipWin' | 'keyboard' | 'checkVoice' | 'callVoice' | 'allinVoice') => {
     if (!soundEnabledRef.current) return;
     const player = kind === 'deal' ? dealSound : kind === 'turn' ? turnSound
       : kind === 'action' ? actionSound : kind === 'win' ? winSound
-      : kind === 'chipBet' ? chipBetSound : kind === 'chipWin' ? chipWinSound : keyboardSound;
+      : kind === 'chipBet' ? chipBetSound : kind === 'chipWin' ? chipWinSound
+      : kind === 'checkVoice' ? checkVoice : kind === 'callVoice' ? callVoice : kind === 'allinVoice' ? allinVoice : keyboardSound;
     void player.seekTo(0).then(() => player.play()).catch(() => {});
   };
   const setSound = (enabled: boolean) => { soundEnabledRef.current = enabled; setSoundEnabled(enabled); };
@@ -258,6 +263,18 @@ export default function App() {
       const previous = lastSoundSnapshot.current;
       lastSoundSnapshot.current = next;
       if (previous && previous.handNo === next.handNo) {
+        // Speak only confirmed game actions, not locally tapped buttons or
+        // replays of the same snapshot. Every phone hears the same action.
+        const oldTop = previous.log?.[0];
+        const overlapAt = oldTop ? next.log.indexOf(oldTop) : -1;
+        const freshLines = overlapAt >= 0 ? next.log.slice(0, overlapAt) : next.log.slice(0, 4);
+        // A street transition can be newer than the action, so search all
+        // fresh lines rather than just the first log line.
+        const confirmed = freshLines.find(line => /:\s*(check|call|allin)(?:\s|$)/.test(line));
+        const spoken = confirmed?.match(/:\s*(check|call|allin)(?:\s|$)/)?.[1];
+        if (spoken === 'check') playEffect('checkVoice');
+        else if (spoken === 'call') playEffect('callVoice');
+        else if (spoken === 'allin') playEffect('allinVoice');
         const paidIn = next.players.some(p => p.totalBet > (previous.players.find(old => old.id === p.id)?.totalBet ?? p.totalBet));
         const paidOut = next.players.some(p => {
           const old = previous.players.find(q => q.id === p.id);
@@ -399,11 +416,12 @@ export default function App() {
     void roomRef.current?.leave();
   }, []);
   const me = state?.players.find(p => p.id === state.you);
+  const winners = new Set(state?.street === 'showdown' ? (state.result?.winners ?? []).map(w => w.id) : []);
   const myTurn = !!(state && me && state.turn === me.seat);
   const toCall = me && state ? Math.max(0, state.currentBet - me.streetBet) : 0;
   const maxTotal = me ? me.streetBet + me.stack : 0;
   const minTotal = state ? state.currentBet + state.minRaise : 0;
-  const send = (move: Move, amount?: number) => {if(connected){roomRef.current?.send('move', {move, amount});playEffect('action');}};
+  const send = (move: Move, amount?: number) => {if(connected){roomRef.current?.send('move', {move, amount});if(move!=='check'&&move!=='call'&&move!=='allin')playEffect('action');}};
   const start = () => {if(connected)roomRef.current?.send('start');};
   useEffect(()=>{
     if(!state||!me)return;
@@ -608,7 +626,7 @@ export default function App() {
             {others.map((p, i) => {
               const pos = seats[i];
               return pos ? <View key={p.id} style={[styles.seatPosition, {left: pos.left, top: pos.top}]}>
-                <PlayerSeat p={p} dealer={state.dealer === p.seat} turn={state.turn === p.seat} mine={false} width={seatWidth} blind={blindOf(p.seat)} handNo={state.handNo}/>
+                <PlayerSeat p={p} dealer={state.dealer === p.seat} turn={state.turn === p.seat} mine={false} winner={winners.has(p.id)} width={seatWidth} blind={blindOf(p.seat)} handNo={state.handNo}/>
               </View> : null;
             })}
             <View style={styles.potBlock}>
@@ -620,7 +638,7 @@ export default function App() {
               {Array.from({length: 5}, (_, i) => <RevealCard key={`${state.handNo}-${i}`} code={state.board[i]} order={i < 3 ? i : 0} compact/>)}
             </View>
             <View style={styles.mySeatOnTable}>
-              {me ? <PlayerSeat p={me} dealer={state.dealer === me.seat} turn={myTurn} mine width={Math.max(94, seatWidth + 18)} blind={blindOf(me.seat)} handNo={state.handNo}/> : null}
+              {me ? <PlayerSeat p={me} dealer={state.dealer === me.seat} turn={myTurn} mine winner={winners.has(me.id)} width={Math.max(94, seatWidth + 18)} blind={blindOf(me.seat)} handNo={state.handNo}/> : null}
             </View>
             {flying.map(event => {
               const from = playerPoint(event.playerId);
@@ -806,6 +824,8 @@ const styles = StyleSheet.create({
   seatTurn: {borderColor: C.gold, borderWidth: 2.5, backgroundColor: '#22593F'},
   seatMine: {backgroundColor: '#244734'},
   seatFolded: {opacity: 0.48},
+  seatWinner: {borderColor: '#FA424C', borderWidth: 3.5, backgroundColor: '#4D2328', opacity: 1, shadowColor: '#F52A39', shadowOpacity: 0.95, shadowRadius: 14, elevation: 12},
+  seatWinnerBadge: {fontSize: 10, color: '#FFE3A2', fontWeight: '900', marginTop: 2},
   seatHeader: {flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4, width: '100%'},
   seatDot: {height: 6, width: 6, borderRadius: 3},
   seatName: {fontWeight: '800', fontSize: 10, color: C.ivory, flexShrink: 1},

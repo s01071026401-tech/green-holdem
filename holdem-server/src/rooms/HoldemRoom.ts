@@ -230,7 +230,7 @@ export class HoldemRoom extends Room {
       try{
         const before=this.game.board.length;
         const stacks=new Map(this.game.players.map(p=>[p.id,p.stack]));
-        const decision=decideBot(actor,this.game.board,this.game.currentBet,this.game.minRaise,this.botLevels.get(botId)??'medium');
+        const decision=decideBot(actor,this.game.board,this.game.currentBet,this.game.minRaise,this.botLevels.get(botId)??'medium',Math.random,{pot:this.game.view(botId).totalPot,opponents:this.game.players.filter(p=>p.id!==botId&&p.hole.length===2&&!p.folded).length});
         try{this.game.action(botId,decision.move,decision.amount);}catch{
           this.game.action(botId,this.game.currentBet>actor.streetBet?'call':'check');
         }
